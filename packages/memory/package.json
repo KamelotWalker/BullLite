@@ -1,0 +1,16 @@
+{
+  "name": "@bulllite/memory",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "main": "./src/index.ts",
+  "exports": { ".": "./src/index.ts" },
+  "scripts": { "test": "vitest run", "typecheck": "tsc --noEmit" },
+  "peerDependencies": { "bullmq": "6.4.0" },
+  "devDependencies": {
+    "bullmq": "6.4.0",
+    "@types/node": "^22.0.0",
+    "typescript": "^5.6.0",
+    "vitest": "^2.1.0"
+  }
+}

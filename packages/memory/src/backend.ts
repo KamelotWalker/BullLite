@@ -1,75 +1,159 @@
 import { EventEmitter } from 'node:events';
-import { QueueKeys } from 'bullmq';
+import { ErrorCode, QueueKeys } from 'bullmq';
 import type {
   BackendFactory,
+  FinishedStatus,
   IQueueBackend,
   JobJson,
+  JobProgress,
   JobState,
+  JobType,
+  JobsOptions,
   KeepJobs,
   KeysMap,
+  MinimalJob,
+  MoveToDelayedOpts,
   QueueBaseOptions,
+  RetryJobOpts,
+  RetryOptions,
+  StreamReadRaw,
 } from 'bullmq';
-import { getStore, type QueueStore, type StoredJob } from './store.ts';
+import { finishedError, UnsupportedError } from './errors.ts';
+import {
+  acquireNamespace,
+  releaseNamespace,
+  type ClientEntry,
+  type MemoryJobState,
+  type NamespaceStore,
+  type QueueStore,
+  type StoredJob,
+} from './store.ts';
 
 export interface MemoryConnectionOptions {
-  /** Isolation domain. Backends created with the same namespace and queue name share jobs. */
+  /**
+   * Isolation domain. Queue/Worker/QueueEvents instances that use the same
+   * namespace (and the same queue name and prefix) share jobs. Default `'default'`.
+   */
   namespace?: string;
+  /**
+   * Keep the namespace's data after the last instance on it closes. By default
+   * a namespace is released (all its jobs dropped) when its last
+   * Queue/Worker/QueueEvents closes. A retained namespace lives until
+   * `resetMemoryStore(namespace)`.
+   */
+  retain?: boolean;
 }
 
-/** Thrown (as a rejected promise) by every `IQueueBackend` member this backend does not implement. */
-export class UnsupportedError extends Error {
-  readonly method: string;
-  constructor(method: string, detail?: string) {
-    super(
-      `@bulllite/memory does not support ${detail ?? `IQueueBackend.${method}()`}. ` +
-        `Only the Queue.add -> Worker (single attempt, no delay/priority) path is implemented.`,
-    );
-    this.name = 'UnsupportedError';
-    this.method = method;
-  }
-}
-
-type WorkerishOptions = QueueBaseOptions<MemoryConnectionOptions> & {
+/** The subset of Worker/Queue options this backend reads. */
+interface BackendOptions extends QueueBaseOptions<MemoryConnectionOptions> {
+  name?: string;
+  prefix?: string;
   lockDuration?: number;
   maxStalledCount?: number;
-};
+  stalledInterval?: number;
+  removeOnComplete?: boolean | number | KeepJobs;
+  removeOnFail?: boolean | number | KeepJobs;
+  limiter?: unknown;
+  metrics?: unknown;
+}
 
 type NextJob = [JobJson | undefined, string, number, number];
+type Marker = { member: string; score: number };
 
 const DEFAULT_NAMESPACE = 'default';
+const DEFAULT_PREFIX = 'bull';
 const DEFAULT_LOCK_DURATION = 30_000;
+const DEFAULT_STALLED_INTERVAL = 30_000;
 const DEFAULT_MAX_STALLED_COUNT = 1;
+const STALLED_REASON = 'job stalled more than allowable limit';
+const CHECK_NOW: Marker = { member: '0', score: 0 };
+
+/** Redis `LRANGE`/`ZRANGE` index semantics (inclusive, negative = from the end). */
+function redisRange<T>(list: readonly T[], start: number, end: number): T[] {
+  const len = list.length;
+  const s = start < 0 ? Math.max(len + start, 0) : start;
+  const e = end < 0 ? len + end : Math.min(end, len - 1);
+  if (s > e || s >= len) return [];
+  return list.slice(s, e + 1);
+}
+
+/** `count: 0` = remove on finish, `count: -1`/undefined = keep all, `age` in seconds. */
+type Retention = { count?: number; age?: number };
+
+function normalizeKeep(
+  jobKeep: boolean | number | KeepJobs | undefined,
+  workerKeep: boolean | number | KeepJobs | undefined,
+): Retention {
+  // Same precedence as RedisQueueBackend.getKeepJobs: the job option wins, else the worker option.
+  const keep = jobKeep === undefined ? workerKeep : jobKeep;
+  if (keep === undefined || keep === false) return { count: -1 };
+  if (keep === true) return { count: 0 };
+  if (typeof keep === 'number') return { count: keep };
+  return keep;
+}
+
+function cloneJson<T>(value: T): T {
+  return value === undefined ? value : (JSON.parse(JSON.stringify(value)) as T);
+}
+
+function parseStreamId(id: string): [number, number] {
+  const [ms, seq] = id.split('-');
+  return [Number(ms) || 0, seq === undefined ? 0 : Number(seq) || 0];
+}
 
 class MemoryBackend extends EventEmitter {
   readonly qualifiedName: string;
   readonly keys: KeysMap;
   /** Seconds. The wait primitive is event driven, so any positive value is fine. */
   readonly minimumBlockTimeout = 0.001;
+  /** Seconds. `waitForJob` re-arms to the next delayed job itself, so idle workers need not re-poll often. */
+  readonly maximumBlockTimeout = 3600;
 
-  private readonly namespace: string;
-  private readonly queueName: string;
+  private readonly prefix: string;
+  private readonly ns: NamespaceStore;
   private readonly store: QueueStore;
-  private readonly lockDuration: number;
-  private readonly maxStalledCount: number;
-  private readonly unsubscribe: () => void;
+  private readonly opts: BackendOptions;
+  private readonly client: ClientEntry;
+  /** Event-stream position at construction; what `'$'` means for this instance. */
+  private readonly dollarCursor: string;
   private closingPromise: Promise<void> | undefined;
-  /** Set when a job was added since the last `waitForJob` consumed it (prevents a lost wake-up). */
-  private signaled = false;
-  private waiter: { resolve: (v: { member: string; score: number } | null) => void; timer: NodeJS.Timeout } | undefined;
+  private closed = false;
+  private blockingDisconnected = false;
+  private cancelJobWait: (() => void) | undefined;
+  private cancelEventWait: (() => void) | undefined;
 
-  constructor(queueName: string, opts: WorkerishOptions) {
+  constructor(
+    queueName: string,
+    opts: BackendOptions,
+    factoryOptions: { blocking?: boolean; withBlockingConnection?: boolean } = {},
+  ) {
     super();
-    this.queueName = queueName;
-    this.namespace = opts.connection?.namespace ?? DEFAULT_NAMESPACE;
-    this.store = getStore(this.namespace, queueName);
-    this.lockDuration = opts.lockDuration ?? DEFAULT_LOCK_DURATION;
-    this.maxStalledCount = opts.maxStalledCount ?? DEFAULT_MAX_STALLED_COUNT;
-    this.qualifiedName = `${this.namespace}:${queueName}`;
-    this.keys = new QueueKeys(this.namespace).getKeys(queueName);
-    this.unsubscribe = this.store.subscribe(() => {
-      this.signaled = true;
-      this.wake({ member: '0', score: 0 });
-    });
+    if (opts.limiter) throw new UnsupportedError('Worker', 'the Worker `limiter` option (rate limiting)');
+    if (opts.metrics) throw new UnsupportedError('Worker', 'the Worker `metrics` option (getMetrics)');
+    this.opts = opts;
+    this.prefix = opts.prefix ?? DEFAULT_PREFIX;
+    this.qualifiedName = `${this.prefix}:${queueName}`;
+    this.keys = new QueueKeys(this.prefix).getKeys(queueName);
+    const connection = opts.connection ?? {};
+    this.ns = acquireNamespace(connection.namespace ?? DEFAULT_NAMESPACE, connection.retain === true);
+    this.store = this.ns.queue(this.qualifiedName);
+    this.dollarCursor = this.store.lastEventId;
+    // Same client names BullMQ's Redis/Postgres factories give workers and QueueEvents (Queue.getWorkers()).
+    let name: string | undefined;
+    if (factoryOptions.withBlockingConnection) name = this.clientName(opts.name ? `:w:${opts.name}` : '');
+    else if (factoryOptions.blocking) name = this.clientName(':qe');
+    this.client = { name };
+    this.ns.clients.add(this.client);
+  }
+
+  /** Runs a synchronous store transition as one atomic step. */
+  private run<T>(fn: () => T): Promise<T> {
+    if (this.closed) return Promise.reject(new Error('Connection is closed.'));
+    try {
+      return Promise.resolve(fn());
+    } catch (err) {
+      return Promise.reject(err);
+    }
   }
 
   // ---- lifecycle -----------------------------------------------------------
@@ -83,11 +167,15 @@ class MemoryBackend extends EventEmitter {
   }
 
   close(_force?: boolean): Promise<void> {
-    this.closingPromise ??= (async () => {
-      this.unsubscribe();
-      this.wake(null);
+    if (!this.closingPromise) {
+      this.closed = true;
+      this.cancelJobWait?.();
+      this.cancelEventWait?.();
+      this.ns.clients.delete(this.client);
+      releaseNamespace(this.ns);
+      this.closingPromise = Promise.resolve();
       this.emit('close');
-    })();
+    }
     return this.closingPromise;
   }
 
@@ -95,7 +183,8 @@ class MemoryBackend extends EventEmitter {
     return this.close(true);
   }
 
-  setName(_name: string): Promise<void> {
+  setName(name: string): Promise<void> {
+    this.client.name = name;
     return Promise.resolve();
   }
 
@@ -120,223 +209,886 @@ class MemoryBackend extends EventEmitter {
     return `${this.qualifiedName}${suffix}`;
   }
 
-  setQueueMeta(values: Record<string, string | number>): Promise<number> {
-    let added = 0;
-    for (const [field, value] of Object.entries(values)) {
-      if (!this.store.meta.has(field)) added++;
-      this.store.meta.set(field, String(value));
-    }
-    return Promise.resolve(added);
-  }
-
   // ---- adding ----------------------------------------------------------------
 
   addJob(job: JobJson, jobId: string): Promise<string> {
-    return Promise.resolve(this.addJobSync(job, jobId));
+    return this.run(() => {
+      this.assertAddable(job);
+      return this.insertJob(job, jobId);
+    });
   }
 
-  private addJobSync(job: JobJson, jobId: string): string {
-    const opts = job.opts ?? {};
-    if (opts.delay) throw new UnsupportedError('addJob', 'the `delay` job option');
-    if (opts.priority) throw new UnsupportedError('addJob', 'the `priority` job option');
-    if (opts.lifo) throw new UnsupportedError('addJob', 'the `lifo` job option');
-    if (opts.parent || job.parentKey) throw new UnsupportedError('addJob', 'flows (`parent` job option)');
-    if (opts.deduplication || job.deduplicationId) throw new UnsupportedError('addJob', 'the `deduplication` job option');
-    if ((opts as { repeat?: unknown }).repeat || job.repeatJobKey) throw new UnsupportedError('addJob', 'repeatable jobs / job schedulers');
-    if (opts.attempts !== undefined && opts.attempts > 1) {
-      throw new UnsupportedError('addJob', 'retries (`attempts` > 1)');
+  addJobs(entries: { job: JobJson; jobId: string }[]): Promise<string[]> {
+    return this.run(() => {
+      for (const entry of entries) this.assertAddable(entry.job); // all-or-nothing
+      return entries.map((entry) => this.insertJob(entry.job, entry.jobId));
+    });
+  }
+
+  private assertAddable(job: JobJson): void {
+    const opts = (job.opts ?? {}) as JobsOptions & { repeat?: unknown; debounce?: unknown };
+    if (opts.parent || job.parent || job.parentKey) throw new UnsupportedError('addJob', 'flows (the `parent` job option)');
+    if (opts.deduplication || opts.debounce || job.deduplicationId) {
+      throw new UnsupportedError('addJob', 'the `deduplication` / `debounce` job option');
     }
+    if (opts.repeat || job.repeatJobKey) throw new UnsupportedError('addJob', 'repeatable jobs / job schedulers');
+  }
 
+  private insertJob(json: JobJson, jobId: string): string {
+    const store = this.store;
     // BullMQ semantics: a custom jobId that already exists is NOT added again; the
-    // existing job's id is returned and the stored job stays untouched.
-    if (jobId && this.store.jobs.has(jobId)) return jobId;
-
-    const id = jobId || this.store.nextId();
-    const stored: StoredJob = { json: { ...structuredClone(job), id }, state: 'wait' };
-    this.store.jobs.set(id, stored);
-    this.store.pushWait(id);
-    this.store.notify();
+    // existing job's id is returned, the stored job stays untouched and `duplicated` is emitted.
+    if (jobId && store.jobs.has(jobId)) {
+      store.publish('duplicated', { jobId });
+      return jobId;
+    }
+    const id = jobId || store.nextJobId();
+    const opts = structuredClone(json.opts ?? {});
+    const now = Date.now();
+    const job: StoredJob = {
+      id,
+      name: json.name,
+      data: json.data ?? '{}',
+      opts,
+      timestamp: json.timestamp ?? now,
+      delay: Math.max(opts.delay ?? 0, 0),
+      priority: opts.priority ?? 0,
+      progress: cloneJson(json.progress ?? 0),
+      attemptsMade: 0,
+      attemptsStarted: 0,
+      stalledCounter: 0,
+      stacktrace: json.stacktrace,
+      returnvalue: json.returnvalue,
+      state: 'wait',
+      ticket: 0,
+      order: 0,
+      dueAt: 0,
+      stalledMarked: false,
+      logs: [],
+    };
+    store.insert(job);
+    store.publish('added', { jobId: id, name: job.name });
+    if (job.delay > 0) {
+      store.enqueueDelayed(job, job.timestamp + job.delay);
+      store.publish('delayed', { jobId: id, delay: job.dueAt });
+    } else {
+      store.enqueueClaimable(job, !!opts.lifo && job.priority === 0);
+      store.publish('waiting', { jobId: id });
+    }
+    store.signalJobs();
     return id;
   }
 
   // ---- claiming / finishing --------------------------------------------------
 
   moveToActive(token: string, name?: string): Promise<NextJob> {
-    return Promise.resolve(this.claim(token, name));
+    return this.run(() => this.claim(token, name, Date.now()));
   }
 
-  /** Atomic claim: pick, mutate and lock in one synchronous step. */
-  private claim(token: string, workerName?: string): NextJob {
-    const id = this.store.shiftWait();
-    if (id === undefined) return [undefined, '', 0, 0];
-    const stored = this.store.jobs.get(id)!;
-    const now = Date.now();
-    stored.state = 'active';
-    stored.lock = { token, until: now + this.lockDuration };
-    stored.json.processedOn = now;
-    stored.json.attemptsStarted = (stored.json.attemptsStarted ?? 0) + 1;
-    if (workerName) stored.json.processedBy = workerName;
-    return [structuredClone(stored.json), id, 0, 0];
+  private get lockDuration(): number {
+    return this.opts.lockDuration ?? DEFAULT_LOCK_DURATION;
   }
 
-  moveToCompleted(
-    job: { id?: string },
-    returnValue: unknown,
+  private isMaxedSync(): boolean {
+    const raw = this.store.meta.get('concurrency');
+    return raw !== undefined && this.store.count('active') >= Number(raw);
+  }
+
+  /** Promotes due delayed jobs (regardless of pause, like Redis/Postgres). */
+  private promoteDue(now: number): void {
+    for (const job of this.store.takeDueDelayed(now)) {
+      job.delay = 0;
+      this.store.enqueueClaimable(job);
+      this.store.publish('waiting', { jobId: job.id, prev: 'delayed' });
+    }
+  }
+
+  private emptyResult(): NextJob {
+    return [undefined, '', 0, this.store.nextDelayedDue() ?? 0];
+  }
+
+  /** Atomic claim: promote due delayed jobs, then pick, lock and activate the next job. */
+  private claim(token: string, workerName: string | undefined, now: number): NextJob {
+    this.promoteDue(now);
+    if (this.store.paused || this.isMaxedSync()) return this.emptyResult();
+    const job = this.store.takeNextClaimable();
+    if (!job) return this.emptyResult();
+    this.store.setState(job, 'active');
+    job.lock = { token, until: now + this.lockDuration };
+    job.stalledMarked = false;
+    job.processedOn = now;
+    job.attemptsStarted++;
+    if (workerName) job.processedBy = workerName;
+    this.store.publish('active', { jobId: job.id, prev: 'waiting' });
+    return [this.toJobJson(job), job.id, 0, 0];
+  }
+
+  /** Lock/state check shared by every "leave active" transition (Redis `removeLock` + `LREM active`). */
+  private requireActive(jobId: string, token: string | undefined, command: string): StoredJob {
+    const job = this.store.jobs.get(jobId);
+    if (!job) throw finishedError(ErrorCode.JobNotExist, jobId, command, 'active');
+    if (token !== undefined && token !== '0') {
+      if (!job.lock || job.lock.until <= Date.now()) {
+        throw finishedError(ErrorCode.JobLockNotExist, jobId, command, 'active');
+      }
+      if (job.lock.token !== token) throw finishedError(ErrorCode.JobLockMismatch, jobId, command, 'active');
+    }
+    if (job.state !== 'active') throw finishedError(ErrorCode.JobNotInState, jobId, command, 'active');
+    return job;
+  }
+
+  moveToCompleted<T = any, R = any, N extends string = string>(
+    job: MinimalJob<T, R, N>,
+    returnValue: R,
     removeOnComplete: boolean | number | KeepJobs,
     token: string,
     fetchNext: boolean,
   ): Promise<{ result: void | any[]; finishedOn: number }> {
-    return Promise.resolve(this.finish(job.id, 'completed', removeOnComplete, token, fetchNext, (json) => {
-      json.returnvalue = JSON.stringify(returnValue === undefined ? null : returnValue);
-    }));
+    return this.run(() => {
+      const stored = this.requireActive(job.id ?? '', token, 'moveToFinished');
+      const returnvalue = JSON.stringify(returnValue === undefined ? null : returnValue);
+      stored.returnvalue = returnvalue;
+      return this.finish(stored, 'completed', normalizeKeep(removeOnComplete, this.opts.removeOnComplete), token, fetchNext, {
+        jobId: stored.id,
+        returnvalue,
+        prev: 'active',
+      });
+    });
   }
 
-  moveToFailed(
-    job: { id?: string },
+  moveToFailed<T = any, R = any, N extends string = string>(
+    job: MinimalJob<T, R, N>,
     failedReason: string,
     removeOnFail: boolean | number | KeepJobs,
     token: string,
     fetchNext: boolean,
     fieldsToUpdate?: Record<string, any>,
   ): Promise<{ result: void | any[]; finishedOn: number }> {
-    return Promise.resolve(this.finish(job.id, 'failed', removeOnFail, token, fetchNext, (json) => {
-      json.failedReason = failedReason;
-      if (typeof fieldsToUpdate?.stacktrace === 'string') json.stacktrace = fieldsToUpdate.stacktrace;
-    }));
+    return this.run(() => {
+      const stored = this.requireActive(job.id ?? '', token, 'moveToFinished');
+      stored.failedReason = failedReason;
+      if (typeof fieldsToUpdate?.stacktrace === 'string') stored.stacktrace = fieldsToUpdate.stacktrace;
+      stored.deferredFailure = undefined;
+      return this.finish(stored, 'failed', normalizeKeep(removeOnFail, this.opts.removeOnFail), token, fetchNext, {
+        jobId: stored.id,
+        failedReason,
+        prev: 'active',
+      });
+    });
   }
 
   private finish(
-    id: string | undefined,
+    job: StoredJob,
     target: 'completed' | 'failed',
-    remove: boolean | number | KeepJobs,
+    keep: Retention,
     token: string,
     fetchNext: boolean,
-    apply: (json: JobJson) => void,
+    event: Record<string, string>,
   ): { result: void | any[]; finishedOn: number } {
-    if (remove !== undefined && remove !== true && remove !== false) {
-      throw new UnsupportedError(
-        target === 'completed' ? 'moveToCompleted' : 'moveToFailed',
-        `removeOn${target === 'completed' ? 'Complete' : 'Fail'} with a count/age (only true/false are supported)`,
-      );
-    }
-    const stored = id === undefined ? undefined : this.store.jobs.get(id);
-    if (!stored) throw new Error(`Missing key for job ${id}. moveToFinished`);
-    if (stored.state !== 'active' || stored.lock?.token !== token) {
-      throw new Error(`Missing lock for job ${id}. moveToFinished`);
-    }
+    const store = this.store;
     const finishedOn = Date.now();
-    stored.json.finishedOn = finishedOn;
-    stored.json.attemptsMade = (stored.json.attemptsMade ?? 0) + 1;
-    apply(stored.json);
-    stored.lock = undefined;
-    if (remove === true) this.store.jobs.delete(stored.json.id);
-    else stored.state = target;
+    job.finishedOn = finishedOn;
+    job.attemptsMade++;
+    job.lock = undefined;
+    job.stalledMarked = false;
+    if (keep.count === 0) store.delete(job);
+    else {
+      store.setState(job, target);
+      this.applyRetention(target, keep, finishedOn);
+    }
+    store.publish(target, event);
+    if (target === 'failed' && job.attemptsMade >= (job.opts.attempts ?? 0)) {
+      store.publish('retries-exhausted', { jobId: job.id, attemptsMade: job.attemptsMade });
+    }
+    if (store.meta.has('concurrency')) store.signalJobs();
 
-    if (!fetchNext) return { result: undefined, finishedOn };
-    const next = this.claim(token);
-    return { result: next[0] ? next : [], finishedOn };
+    let result: void | any[] = undefined;
+    if (fetchNext && !this.closingPromise) {
+      result = this.claim(token, this.opts.name, finishedOn);
+      if (result[0]) return { result, finishedOn };
+    }
+    if (store.count('wait') === 0 && store.count('active') === 0 && store.count('prioritized') === 0) {
+      store.publish('drained');
+    }
+    return { result, finishedOn };
+  }
+
+  /** removeOnComplete/removeOnFail with `age`/`count` (Redis `removeJobsByMaxAge` / `removeJobsByMaxCount`). */
+  private applyRetention(state: 'completed' | 'failed', keep: Retention, now: number): void {
+    const store = this.store;
+    // The index Set is in finish order, i.e. oldest first.
+    if (keep.age !== undefined) {
+      const cutoff = now - keep.age * 1000;
+      for (const id of store.idsIn(state)) {
+        const job = store.jobs.get(id)!;
+        if ((job.finishedOn ?? 0) > cutoff) break;
+        store.delete(job);
+      }
+    }
+    if (keep.count !== undefined && keep.count > 0) {
+      let excess = store.count(state) - keep.count;
+      for (const id of store.idsIn(state)) {
+        if (excess-- <= 0) break;
+        store.delete(store.jobs.get(id)!);
+      }
+    }
+  }
+
+  moveToDelayed(
+    jobId: string,
+    timestamp: number,
+    delay: number,
+    token = '0',
+    opts: MoveToDelayedOpts = {},
+  ): Promise<void | any[]> {
+    return this.run(() => {
+      const job = this.requireActive(jobId, token, 'moveToDelayed');
+      this.applyFields(job, opts.fieldsToUpdate);
+      if (!opts.skipAttempt) job.attemptsMade++;
+      job.delay = delay;
+      this.store.enqueueDelayed(job, timestamp + Math.max(delay, 0));
+      this.store.publish('delayed', { jobId, delay: job.dueAt });
+      this.store.signalJobs();
+      if (opts.fetchNext && !this.closingPromise && token !== '0') {
+        const next = this.claim(token, this.opts.name, Date.now());
+        if (next[0]) return next;
+      }
+      return [];
+    });
+  }
+
+  private applyFields(job: StoredJob, fields: Record<string, any> | undefined): void {
+    if (typeof fields?.failedReason === 'string') job.failedReason = fields.failedReason;
+    if (typeof fields?.stacktrace === 'string') job.stacktrace = fields.stacktrace;
+  }
+
+  retryJob(jobId: string, lifo: boolean, token = '0', opts: RetryJobOpts = {}): Promise<void> {
+    return this.run(() => {
+      const job = this.requireActive(jobId, token, 'retryJob');
+      this.applyFields(job, opts.fieldsToUpdate);
+      job.attemptsMade++;
+      this.store.enqueueClaimable(job, lifo && job.priority === 0);
+      this.store.publish('waiting', { jobId, prev: 'active' });
+      this.store.signalJobs();
+    });
+  }
+
+  moveJobFromActiveToWait(jobId: string, token = '0'): Promise<number> {
+    return this.run(() => {
+      const job = this.store.jobs.get(jobId);
+      if (!job) throw finishedError(ErrorCode.JobNotExist, jobId, 'moveJobFromActiveToWait');
+      if (job.state === 'active' && (token === '0' || job.lock?.token === token)) {
+        // Back to the head of its list (Redis RPUSH / pushBackJobWithPriority): it keeps its turn.
+        this.store.enqueueClaimable(job, true);
+        this.store.publish('waiting', { jobId, prev: 'active' });
+        this.store.signalJobs();
+      }
+      return 0; // no rate limiter in this backend → no remaining window
+    });
+  }
+
+  retryFinishedJob<T = any, R = any, N extends string = string>(
+    minimal: MinimalJob<T, R, N>,
+    state: 'failed' | 'completed',
+    opts: RetryOptions = {},
+  ): Promise<void> {
+    return this.run(() => {
+      const id = minimal.id ?? '';
+      const job = this.store.jobs.get(id);
+      if (!job) throw finishedError(ErrorCode.JobNotExist, id, 'reprocessJob', state);
+      if (job.state !== state) throw finishedError(ErrorCode.JobNotInState, id, 'reprocessJob', state);
+      job.finishedOn = undefined;
+      job.processedOn = undefined;
+      if (state === 'completed') job.returnvalue = undefined;
+      else job.failedReason = undefined;
+      if (opts.resetAttemptsMade) job.attemptsMade = 0;
+      if (opts.resetAttemptsStarted) job.attemptsStarted = 0;
+      this.store.enqueueClaimable(job, !!job.opts.lifo && job.priority === 0);
+      this.store.publish('waiting', { jobId: job.id, prev: state });
+      this.store.signalJobs();
+    });
+  }
+
+  promote(jobId: string): Promise<void> {
+    return this.run(() => {
+      const job = this.store.jobs.get(jobId);
+      if (!job) throw finishedError(ErrorCode.JobNotExist, jobId, 'promote', 'delayed');
+      if (job.state !== 'delayed') throw finishedError(ErrorCode.JobNotInState, jobId, 'promote', 'delayed');
+      job.delay = 0;
+      this.store.enqueueClaimable(job);
+      this.store.publish('waiting', { jobId, prev: 'delayed' });
+      this.store.signalJobs();
+    });
   }
 
   // ---- locks / stalled -------------------------------------------------------
 
+  extendLock(jobId: string, token: string, duration: number): Promise<number> {
+    return this.run(() => (this.extend(jobId, token, duration, Date.now()) ? 1 : 0));
+  }
+
   extendLocks(jobIds: string[], tokens: string[], duration: number): Promise<string[]> {
-    return Promise.resolve(jobIds.filter((id, i) => !this.extend(id, tokens[i] ?? '', duration)));
-  }
-
-  private extend(jobId: string, token: string, duration: number): boolean {
-    const stored = this.store.jobs.get(jobId);
-    if (stored?.state !== 'active' || stored.lock?.token !== token) return false;
-    stored.lock.until = Date.now() + duration;
-    return true;
-  }
-
-  moveStalledJobsToWait(): Promise<string[]> {
-    const now = Date.now();
-    const moved: string[] = [];
-    for (const [id, stored] of this.store.jobs) {
-      if (stored.state !== 'active' || !stored.lock || stored.lock.until > now) continue;
-      stored.lock = undefined;
-      stored.json.stalledCounter = (stored.json.stalledCounter ?? 0) + 1;
-      if (stored.json.stalledCounter > this.maxStalledCount) {
-        stored.state = 'failed';
-        stored.json.failedReason = 'job stalled more than allowable limit';
-        stored.json.finishedOn = now;
-      } else {
-        stored.state = 'wait';
-        this.store.pushWait(id);
-        moved.push(id);
-      }
-    }
-    if (moved.length) this.store.notify();
-    return Promise.resolve(moved);
-  }
-
-  // ---- reads -----------------------------------------------------------------
-
-  getState(jobId: string): Promise<JobState | 'unknown'> {
-    const state = this.store.jobs.get(jobId)?.state;
-    return Promise.resolve(state === 'wait' ? 'waiting' : (state ?? 'unknown'));
-  }
-
-  getJobData(jobId: string): Promise<JobJson | undefined> {
-    const stored = this.store.jobs.get(jobId);
-    return Promise.resolve(stored ? structuredClone(stored.json) : undefined);
-  }
-
-  // ---- blocking wait ---------------------------------------------------------
-
-  /** Resolves on the next add signal, on timeout (`null`) or on disconnectBlocking/close (`null`). */
-  waitForJob(blockTimeout: number): Promise<{ member: string; score: number } | null> {
-    if (this.signaled) {
-      this.signaled = false;
-      return Promise.resolve({ member: '0', score: 0 });
-    }
-    if (this.closingPromise) return Promise.resolve(null);
-    this.wake(null);
-    return new Promise((resolve) => {
-      const timer = setTimeout(() => this.wake(null), Math.max(0, blockTimeout * 1000));
-      this.waiter = { resolve, timer };
+    return this.run(() => {
+      const now = Date.now();
+      return jobIds.filter((id, i) => !this.extend(id, tokens[i] ?? '', duration, now));
     });
   }
 
-  private wake(value: { member: string; score: number } | null): void {
-    const waiter = this.waiter;
-    if (!waiter) return;
-    this.waiter = undefined;
-    clearTimeout(waiter.timer);
-    if (value) this.signaled = false;
-    waiter.resolve(value);
+  private extend(jobId: string, token: string, duration: number, now: number): boolean {
+    const job = this.store.jobs.get(jobId);
+    if (job?.state !== 'active' || !job.lock || job.lock.token !== token) return false;
+    job.lock.until = now + duration;
+    job.stalledMarked = false; // Redis extendLock also SREMs the job from the stalled set
+    return true;
+  }
+
+  /**
+   * Two-phase mark/sweep, throttled to once per `stalledInterval` per queue
+   * (Redis `moveStalledJobsToWait` / Postgres `move_stalled_jobs_to_wait`): an
+   * active job that was marked on the previous pass and whose lock has expired
+   * goes back to wait; past `maxStalledCount` it carries a deferred failure the
+   * worker turns into "job stalled more than allowable limit".
+   */
+  moveStalledJobsToWait(): Promise<string[]> {
+    return this.run(() => {
+      const store = this.store;
+      const now = Date.now();
+      const interval = this.opts.stalledInterval ?? DEFAULT_STALLED_INTERVAL;
+      if (store.lastStalledCheck !== undefined && now < store.lastStalledCheck + interval) return [];
+      store.lastStalledCheck = now;
+      const maxStalled = this.opts.maxStalledCount ?? DEFAULT_MAX_STALLED_COUNT;
+      const stalled: StoredJob[] = [];
+      for (const id of store.idsIn('active')) {
+        const job = store.jobs.get(id)!;
+        if (job.stalledMarked && (!job.lock || job.lock.until < now)) stalled.push(job);
+      }
+      for (const job of stalled) {
+        job.stalledMarked = false;
+        job.stalledCounter++;
+        if (job.stalledCounter > maxStalled) job.deferredFailure = STALLED_REASON;
+        store.enqueueClaimable(job);
+        store.publish('stalled', { jobId: job.id });
+      }
+      for (const id of store.idsIn('active')) store.jobs.get(id)!.stalledMarked = true;
+      if (stalled.length) store.signalJobs();
+      return stalled.map((j) => j.id);
+    });
+  }
+
+  // ---- bulk admin --------------------------------------------------------------
+
+  retryFinishedJobs(state: FinishedStatus = 'failed', count = 1000, timestamp = Date.now()): Promise<number> {
+    return this.run(() => {
+      const jobs = this.store.ordered(state).filter((j) => (j.finishedOn ?? 0) <= timestamp).slice(0, count);
+      for (const job of jobs) {
+        job.finishedOn = undefined;
+        job.processedOn = undefined;
+        if (state === 'completed') job.returnvalue = undefined;
+        else job.failedReason = undefined;
+        this.store.enqueueWait(job);
+        this.store.publish('waiting', { jobId: job.id, prev: state });
+      }
+      if (jobs.length) this.store.signalJobs();
+      return jobs.length >= count ? 1 : 0;
+    });
+  }
+
+  promoteJobs(count = 1000): Promise<number> {
+    return this.run(() => {
+      const jobs = this.store.ordered('delayed').slice(0, count);
+      for (const job of jobs) {
+        job.delay = 0;
+        this.store.enqueueWait(job);
+        this.store.publish('waiting', { jobId: job.id, prev: 'delayed' });
+      }
+      if (jobs.length) this.store.signalJobs();
+      return jobs.length >= count ? 1 : 0;
+    });
+  }
+
+  pause(pause: boolean): Promise<void> {
+    return this.run(() => {
+      if (pause) this.store.meta.set('paused', '1');
+      else this.store.meta.delete('paused');
+      this.store.publish(pause ? 'paused' : 'resumed');
+      if (!pause) this.store.signalJobs();
+    });
+  }
+
+  drain(delayed: boolean): Promise<void> {
+    return this.run(() => {
+      const states: MemoryJobState[] = delayed ? ['wait', 'prioritized', 'delayed'] : ['wait', 'prioritized'];
+      for (const state of states) {
+        for (const id of [...this.store.idsIn(state)]) this.store.delete(this.store.jobs.get(id)!);
+      }
+    });
+  }
+
+  cleanJobsByState(state: string, timestamp: number, limit = 0): Promise<string[]> {
+    return this.run(() => {
+      let candidates: StoredJob[];
+      const now = Date.now();
+      switch (state) {
+        case 'completed':
+        case 'failed':
+          candidates = this.store.ordered(state).filter((j) => (j.finishedOn ?? 0) <= timestamp);
+          break;
+        case 'wait':
+        case 'waiting':
+        case 'paused':
+        case 'prioritized':
+        case 'delayed':
+        case 'active': {
+          const internal: MemoryJobState = state === 'waiting' || state === 'paused' ? 'wait' : state;
+          candidates = this.store
+            .ordered(internal)
+            .filter((j) => j.timestamp <= timestamp && !(j.lock && j.lock.until > now));
+          break;
+        }
+        default:
+          return [];
+      }
+      if (limit > 0) candidates = candidates.slice(0, limit);
+      for (const job of candidates) this.store.delete(job);
+      if (candidates.length) this.store.publish('cleaned', { count: candidates.length });
+      return candidates.map((j) => j.id);
+    });
+  }
+
+  obliterate(opts: { force: boolean; count: number }): Promise<number> {
+    return this.run(() => {
+      if (!this.store.paused) throw new Error('Cannot obliterate non-paused queue');
+      if (!opts.force && this.store.count('active') > 0) throw new Error('Cannot obliterate queue with active jobs');
+      this.store.clear();
+      return 0;
+    });
+  }
+
+  /** Jobs and their state live in one record, so orphans cannot exist. */
+  removeOrphanedJobs(_count?: number, _limit?: number): Promise<number> {
+    return this.run(() => 0);
+  }
+
+  // ---- job mutations -----------------------------------------------------------
+
+  private requireJob(jobId: string, command: string): StoredJob {
+    const job = this.store.jobs.get(jobId);
+    if (!job) throw finishedError(ErrorCode.JobNotExist, jobId, command);
+    return job;
+  }
+
+  updateData<T = any, R = any, N extends string = string>(job: MinimalJob<T, R, N>, data: T): Promise<void> {
+    return this.run(() => {
+      this.requireJob(job.id ?? '', 'updateData').data = JSON.stringify(data === undefined ? {} : data);
+    });
+  }
+
+  updateProgress(jobId: string, progress: JobProgress): Promise<void> {
+    return this.run(() => {
+      const job = this.requireJob(jobId, 'updateProgress');
+      job.progress = cloneJson(progress);
+      this.store.publish('progress', { jobId, data: JSON.stringify(progress) });
+    });
+  }
+
+  addLog(jobId: string, logRow: string, keepLogs?: number): Promise<number> {
+    return this.run(() => {
+      const job = this.requireJob(jobId, 'addLog');
+      job.logs.push(logRow);
+      if (keepLogs && job.logs.length > keepLogs) job.logs.splice(0, job.logs.length - keepLogs);
+      return job.logs.length;
+    });
+  }
+
+  clearLogs(jobId: string, keepLogs?: number): Promise<void> {
+    return this.run(() => {
+      const job = this.store.jobs.get(jobId);
+      if (!job) return;
+      job.logs = keepLogs ? job.logs.slice(-keepLogs) : [];
+    });
+  }
+
+  changeDelay(jobId: string, delay: number): Promise<void> {
+    return this.run(() => {
+      const job = this.store.jobs.get(jobId);
+      if (!job) throw finishedError(ErrorCode.JobNotExist, jobId, 'changeDelay', 'delayed');
+      if (job.state !== 'delayed') throw finishedError(ErrorCode.JobNotInState, jobId, 'changeDelay', 'delayed');
+      job.delay = delay;
+      this.store.enqueueDelayed(job, Date.now() + delay);
+      this.store.publish('delayed', { jobId, delay: job.dueAt });
+      this.store.signalJobs();
+    });
+  }
+
+  changePriority(jobId: string, priority = 0, lifo = false): Promise<void> {
+    return this.run(() => {
+      const job = this.requireJob(jobId, 'changePriority');
+      job.priority = priority;
+      job.opts = { ...job.opts, priority };
+      if (job.state === 'wait' || job.state === 'prioritized') {
+        this.store.enqueueClaimable(job, lifo && priority === 0);
+        this.store.signalJobs();
+      }
+    });
+  }
+
+  remove(jobId: string, _removeChildren: boolean): Promise<number> {
+    return this.run(() => {
+      const job = this.store.jobs.get(jobId);
+      if (!job) return 1; // Redis removeJob-2.lua: nothing to remove counts as removed
+      if (job.lock && job.lock.until > Date.now()) return 0;
+      const prev = job.state === 'wait' && this.store.paused ? 'paused' : job.state;
+      this.store.delete(job);
+      this.store.publish('removed', { jobId, prev });
+      return 1;
+    });
+  }
+
+  // ---- queries -----------------------------------------------------------------
+
+  getState(jobId: string): Promise<JobState | 'unknown'> {
+    return this.run(() => {
+      const state = this.store.jobs.get(jobId)?.state;
+      if (state === undefined) return 'unknown';
+      return state === 'wait' ? 'waiting' : state;
+    });
+  }
+
+  isFinished(jobId: string, returnValue?: boolean): Promise<number | [number, string]> {
+    return this.run(() => {
+      const job = this.store.jobs.get(jobId);
+      let status = 0;
+      let value = '';
+      if (!job) {
+        status = -1;
+        value = `Missing key for job ${this.toKey(jobId)}. isFinished`;
+      } else if (job.state === 'completed') {
+        status = 1;
+        value = job.returnvalue ?? 'null';
+      } else if (job.state === 'failed') {
+        status = 2;
+        value = job.failedReason ?? '';
+      }
+      return returnValue ? ([status, value] as [number, string]) : status;
+    });
+  }
+
+  isMaxed(): Promise<boolean> {
+    return this.run(() => this.isMaxedSync());
+  }
+
+  isJobInState(state: string, jobId: string): Promise<boolean> {
+    return this.run(() => {
+      const actual = this.store.jobs.get(jobId)?.state;
+      switch (state) {
+        case 'wait':
+          return actual === 'wait' && !this.store.paused;
+        case 'paused':
+          return actual === 'wait' && this.store.paused;
+        case 'waiting':
+          return actual === 'wait';
+        case 'active':
+        case 'prioritized':
+        case 'delayed':
+        case 'completed':
+        case 'failed':
+          return actual === state;
+        case 'waiting-children':
+          return false;
+        default:
+          throw new Error(`Unknown job state: ${state}`);
+      }
+    });
+  }
+
+  getJobData(jobId: string): Promise<JobJson | undefined> {
+    return this.run(() => {
+      const job = this.store.jobs.get(jobId);
+      return job ? this.toJobJson(job) : undefined;
+    });
+  }
+
+  private toJobJson(job: StoredJob): JobJson {
+    const json: Record<string, unknown> = {
+      id: job.id,
+      name: job.name,
+      data: job.data,
+      opts: structuredClone(job.opts),
+      progress: cloneJson(job.progress),
+      attemptsMade: job.attemptsMade,
+      attemptsStarted: job.attemptsStarted,
+      stalledCounter: job.stalledCounter,
+      timestamp: job.timestamp,
+      delay: job.delay,
+      priority: job.priority,
+      finishedOn: job.finishedOn,
+      processedOn: job.processedOn,
+      failedReason: job.failedReason,
+      stacktrace: job.stacktrace,
+      returnvalue: job.returnvalue,
+      processedBy: job.processedBy,
+      deferredFailure: job.deferredFailure,
+    };
+    for (const key of Object.keys(json)) if (json[key] === undefined) delete json[key];
+    return json as unknown as JobJson;
+  }
+
+  getJobLogs(jobId: string, start: number, end: number, asc: boolean): Promise<{ logs: string[]; count: number }> {
+    return this.run(() => {
+      const logs = this.store.jobs.get(jobId)?.logs ?? [];
+      return { logs: redisRange(asc ? logs : [...logs].reverse(), start, end), count: logs.length };
+    });
+  }
+
+  getRateLimitTtl(maxJobs?: number): Promise<number> {
+    // No limiter can exist on this backend (setRateLimit / `limiter` are unsupported):
+    // Redis answers 0 for "not limited" when maxJobs is given, else -2 (PTTL of a missing key).
+    return this.run(() => (maxJobs ? 0 : -2));
+  }
+
+  getCounts(types: JobType[]): Promise<number[]> {
+    return this.run(() => {
+      const paused = this.store.paused;
+      return types.map((type) => {
+        switch (type as string) {
+          case 'wait':
+          case 'waiting':
+            return paused ? 0 : this.store.count('wait');
+          case 'paused':
+            return paused ? this.store.count('wait') : 0;
+          case 'active':
+          case 'prioritized':
+          case 'delayed':
+          case 'completed':
+          case 'failed':
+            return this.store.count(type as MemoryJobState);
+          default:
+            return 0;
+        }
+      });
+    });
+  }
+
+  getCountsPerPriority(priorities: number[]): Promise<number[]> {
+    return this.run(() => {
+      const perPriority = new Map<number, number>();
+      for (const id of this.store.idsIn('prioritized')) {
+        const p = this.store.jobs.get(id)!.priority;
+        perPriority.set(p, (perPriority.get(p) ?? 0) + 1);
+      }
+      return priorities.map((p) => (p === 0 ? this.store.count('wait') : (perPriority.get(p) ?? 0)));
+    });
+  }
+
+  getRanges(types: JobType[], start = 0, end = -1, asc = false): Promise<[string][]> {
+    return this.run(() => {
+      const paused = this.store.paused;
+      const result = types.map((type) => {
+        switch (type as string) {
+          case 'wait':
+          case 'waiting':
+            return paused ? [] : this.listRange('wait', start, end, asc);
+          case 'paused':
+            return paused ? this.listRange('wait', start, end, asc) : [];
+          case 'active':
+            return this.listRange('active', start, end, asc);
+          case 'prioritized':
+          case 'delayed':
+          case 'completed':
+          case 'failed': {
+            const ids = this.store.ordered(type as MemoryJobState).map((j) => j.id);
+            return redisRange(asc ? ids : ids.reverse(), start, end);
+          }
+          default:
+            return [];
+        }
+      });
+      return result as unknown as [string][];
+    });
+  }
+
+  /**
+   * Emulates `getRanges-1.lua` for the Redis *lists* (`wait`, `active`): the
+   * list holds the newest entry at index 0, and `asc` reads it from the tail.
+   * QueueGetters reverses list results when `asc` is set.
+   */
+  private listRange(state: 'wait' | 'active', start: number, end: number, asc: boolean): string[] {
+    const list = this.store.ordered(state).map((j) => j.id).reverse();
+    if (!asc) return redisRange(list, start, end);
+    const from = end === -1 ? 0 : -(end + 1);
+    const to = start === -1 ? 0 : -(start + 1);
+    return redisRange(list, from, to);
+  }
+
+  getClientList(): Promise<string[]> {
+    return this.run(() => {
+      const lines: string[] = [];
+      let i = 0;
+      for (const client of this.ns.clients) if (client.name) lines.push(`id=${++i} name=${client.name}`);
+      return [lines.join('\n')];
+    });
+  }
+
+  // ---- queue metadata ----------------------------------------------------------
+
+  setQueueMeta(values: Record<string, string | number>): Promise<number> {
+    return this.run(() => {
+      if ('max' in values || 'duration' in values) {
+        throw new UnsupportedError('setQueueMeta', 'global rate limiting (Queue.setGlobalRateLimit)');
+      }
+      let added = 0;
+      for (const [field, value] of Object.entries(values)) {
+        if (!this.store.meta.has(field)) added++;
+        this.store.meta.set(field, String(value));
+      }
+      if ('concurrency' in values) this.store.signalJobs();
+      return added;
+    });
+  }
+
+  getQueueMetaField(field: string): Promise<string | null> {
+    return this.run(() => this.store.meta.get(field) ?? null);
+  }
+
+  getQueueMetaFields(fields: string[]): Promise<(string | null)[]> {
+    return this.run(() => fields.map((f) => this.store.meta.get(f) ?? null));
+  }
+
+  getQueueMeta(): Promise<Record<string, string>> {
+    return this.run(() => Object.fromEntries(this.store.meta));
+  }
+
+  removeQueueMetaFields(fields: string[]): Promise<number> {
+    return this.run(() => {
+      let removed = 0;
+      for (const f of fields) if (this.store.meta.delete(f)) removed++;
+      if (fields.includes('concurrency') || fields.includes('paused')) this.store.signalJobs();
+      return removed;
+    });
+  }
+
+  hasQueueMetaField(field: string): Promise<boolean> {
+    return this.run(() => this.store.meta.has(field));
+  }
+
+  /** No rate-limit key can exist on this backend. */
+  removeRateLimitKey(): Promise<number> {
+    return this.run(() => 0);
+  }
+
+  /** The deprecated Redis priority helper key never exists here. */
+  removeDeprecatedPriorityKey(): Promise<number> {
+    return this.run(() => 0);
+  }
+
+  trimEvents(maxLength: number): Promise<number> {
+    return this.run(() => this.store.trimEvents(maxLength));
+  }
+
+  // ---- event stream ------------------------------------------------------------
+
+  publishEvent(fields: Record<string, string | number>, maxEvents: number): Promise<string> {
+    return this.run(() => {
+      const { event, ...rest } = fields;
+      const id = this.store.publish(String(event), rest);
+      this.store.trimEvents(maxEvents);
+      return id;
+    });
+  }
+
+  /**
+   * `XREAD BLOCK` equivalent: events strictly after `id` (`'$'` = after this
+   * instance was created), waiting up to `blockTimeout` ms (0 = forever) for
+   * the first one. Resolves `null` on timeout or when the instance closes.
+   */
+  async readEvents(id: string, blockTimeout: number): Promise<StreamReadRaw> {
+    if (this.closingPromise) return null as unknown as StreamReadRaw;
+    const [ms, seq] = parseStreamId(id === '$' ? this.dollarCursor : id);
+    let events = this.store.eventsAfter(ms, seq);
+    if (events.length === 0) {
+      await new Promise<void>((resolve) => {
+        let timer: NodeJS.Timeout | undefined;
+        const finish = () => {
+          clearTimeout(timer);
+          unsubscribe();
+          this.cancelEventWait = undefined;
+          resolve();
+        };
+        const unsubscribe = this.store.onEvent(finish);
+        if (blockTimeout > 0) timer = setTimeout(finish, blockTimeout);
+        this.cancelEventWait = finish;
+      });
+      if (this.closingPromise) return null as unknown as StreamReadRaw;
+      events = this.store.eventsAfter(ms, seq);
+    }
+    if (events.length === 0) return null as unknown as StreamReadRaw;
+    return [[this.keys.events!, events.map((e) => [e.id, [...e.fields]])]] as unknown as StreamReadRaw;
+  }
+
+  // ---- blocking wait -----------------------------------------------------------
+
+  private claimableNow(now: number): boolean {
+    const due = this.store.nextDelayedDue();
+    if (due !== undefined && due <= now) return true;
+    return this.store.hasClaimable() && !this.store.paused && !this.isMaxedSync();
+  }
+
+  /**
+   * Check-and-block (no lost wake-up: the check and the subscription happen in
+   * the same synchronous step). Resolves `{ score: 0 }` ("check now") when a
+   * job may be claimable, `null` on timeout (shortened to the next delayed
+   * job's due time) or when interrupted by `disconnectBlocking`/`close`.
+   */
+  waitForJob(blockTimeout: number): Promise<Marker | null> {
+    if (this.closingPromise || this.blockingDisconnected) return Promise.resolve(null);
+    const now = Date.now();
+    if (this.claimableNow(now)) return Promise.resolve(CHECK_NOW);
+    let waitMs = Math.max(blockTimeout, 0) * 1000;
+    const due = this.store.nextDelayedDue();
+    if (due !== undefined) waitMs = Math.min(waitMs, due - now);
+    return new Promise((resolve) => {
+      const finish = (value: Marker | null) => {
+        clearTimeout(timer);
+        unsubscribe();
+        this.cancelJobWait = undefined;
+        resolve(value);
+      };
+      const unsubscribe = this.store.onJobSignal(() => finish(CHECK_NOW));
+      // Never arm a 0 ms timer (under fake timers it would never fire).
+      const timer = setTimeout(() => finish(null), Math.max(waitMs, 1));
+      this.cancelJobWait = () => finish(null);
+    });
   }
 
   disconnectBlocking(_wait?: boolean): Promise<void> {
-    this.wake(null);
+    this.blockingDisconnected = true;
+    this.cancelJobWait?.();
     return Promise.resolve();
   }
 
   reconnectBlocking(): Promise<void> {
+    this.blockingDisconnected = false;
     return Promise.resolve();
   }
 }
 
 /** Every `IQueueBackend` member that has no implementation. Calling one rejects with {@link UnsupportedError}. */
 const UNSUPPORTED = [
-  'addJobs', 'addFlow', 'extendLock', 'addJobScheduler', 'moveToDelayed', 'moveToWaitingChildren',
-  'moveJobFromActiveToWait', 'retryJob', 'retryFinishedJob', 'promote', 'retryFinishedJobs',
-  'promoteJobs', 'pause', 'drain', 'cleanJobsByState', 'obliterate', 'removeOrphanedJobs',
-  'updateData', 'updateProgress', 'addLog', 'clearLogs', 'changeDelay', 'changePriority', 'remove',
-  'removeUnprocessedChildren', 'removeChildDependency', 'removeDeduplicationKey',
-  'deleteDeduplicationKey', 'updateJobSchedulerNextMillis', 'removeJobScheduler', 'getJobScheduler',
+  // flows
+  'addFlow', 'moveToWaitingChildren', 'removeUnprocessedChildren', 'removeChildDependency',
+  'getDependencyCounts', 'getDependencies', 'getProcessedChildrenValues', 'getIgnoredChildrenFailures',
+  'paginate',
+  // job schedulers / repeatable jobs
+  'addJobScheduler', 'updateJobSchedulerNextMillis', 'removeJobScheduler', 'getJobScheduler',
   'isJobScheduler', 'getJobSchedulerData', 'getJobSchedulersRange', 'getJobSchedulersCount',
-  'isFinished', 'isMaxed', 'isJobInState', 'getDeduplicationJobId', 'getJobLogs', 'getRateLimitTtl',
-  'getCounts', 'getCountsPerPriority', 'getRanges', 'getDependencyCounts', 'getDependencies',
-  'getProcessedChildrenValues', 'getIgnoredChildrenFailures', 'getMetrics', 'getClientList',
-  'paginate', 'getQueueMetaField', 'getQueueMetaFields', 'getQueueMeta',
-  'removeQueueMetaFields', 'hasQueueMetaField', 'setRateLimit', 'removeRateLimitKey',
-  'removeDeprecatedPriorityKey', 'trimEvents', 'publishEvent', 'readEvents',
+  // deduplication
+  'removeDeduplicationKey', 'deleteDeduplicationKey', 'getDeduplicationJobId',
+  // rate limiting / metrics
+  'setRateLimit', 'getMetrics',
 ] as const;
 
 type UnsupportedName = (typeof UNSUPPORTED)[number];
-// Declares the unsupported members on the class type so `implements`-style checks below see them.
+// Declares the unsupported members on the class type so the factory's IQueueBackend check sees them.
 interface MemoryBackend extends Pick<IQueueBackend, UnsupportedName> {}
 
 for (const name of UNSUPPORTED) {
@@ -350,5 +1102,9 @@ for (const name of UNSUPPORTED) {
   });
 }
 
-export const createMemoryBackend: BackendFactory<IQueueBackend, MemoryConnectionOptions> = (name, opts) =>
-  new MemoryBackend(name, opts);
+/**
+ * BullMQ `BackendFactory` for the in-memory backend. Use with
+ * `withBackend(createMemoryBackend)` or `setDefaultBackendFactory(createMemoryBackend)`.
+ */
+export const createMemoryBackend: BackendFactory<IQueueBackend, MemoryConnectionOptions> = (name, opts, options) =>
+  new MemoryBackend(name, opts, options);

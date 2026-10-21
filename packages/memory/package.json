@@ -1,16 +1,59 @@
 {
   "name": "@bulllite/memory",
-  "version": "0.0.0",
-  "private": true,
+  "version": "0.1.0-alpha.0",
+  "description": "Experimental in-memory backend for BullMQ 6: run real Queue/Worker/QueueEvents in tests without Redis. Unofficial community project; not affiliated with BullMQ.",
+  "license": "MIT",
   "type": "module",
-  "main": "./src/index.ts",
-  "exports": { ".": "./src/index.ts" },
-  "scripts": { "test": "vitest run", "typecheck": "tsc --noEmit" },
-  "peerDependencies": { "bullmq": "6.4.0" },
+  "main": "./dist/cjs/index.js",
+  "module": "./dist/esm/index.js",
+  "types": "./dist/esm/index.d.ts",
+  "exports": {
+    ".": {
+      "import": {
+        "types": "./dist/esm/index.d.ts",
+        "default": "./dist/esm/index.js"
+      },
+      "require": {
+        "types": "./dist/cjs/index.d.ts",
+        "default": "./dist/cjs/index.js"
+      }
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "sideEffects": false,
+  "engines": {
+    "node": ">=20"
+  },
+  "keywords": [
+    "bullmq",
+    "queue",
+    "memory",
+    "testing",
+    "backend",
+    "redis-free"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/KamelotWalker/BullLite.git",
+    "directory": "packages/memory"
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "test": "node scripts/build.mjs && vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "peerDependencies": {
+    "bullmq": "6.4.0"
+  },
   "devDependencies": {
     "bullmq": "6.4.0",
     "@types/node": "^22.0.0",
-    "typescript": "^5.6.0",
+    "typescript": "^5.9.0",
     "vitest": "^2.1.0"
   }
 }

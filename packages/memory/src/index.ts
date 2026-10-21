@@ -1,3 +1,4 @@
-export { createMemoryBackend, UnsupportedError } from './backend.ts';
+export { createMemoryBackend } from './backend.ts';
 export type { MemoryConnectionOptions } from './backend.ts';
-export { resetMemoryStores } from './store.ts';
+export { UnsupportedError } from './errors.ts';
+export { memoryNamespaces, resetMemoryStore } from './store.ts';

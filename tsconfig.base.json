@@ -1,7 +1,7 @@
 {
   "compilerOptions": {
     "target": "ES2022",
-    "lib": ["ESNext"],
+    "lib": ["ES2022"],
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
     "strict": true,
@@ -9,6 +9,7 @@
     "skipLibCheck": true,
     "esModuleInterop": true,
     "verbatimModuleSyntax": true,
+    "erasableSyntaxOnly": true,
     "noEmit": true,
     "allowImportingTsExtensions": true,
     "types": ["node"]

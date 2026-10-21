@@ -1,5 +1,5 @@
 // Extracts every ```ts block from the repository README, typechecks the blocks
-// against the *built* @bulllite/memory package (as an npm consumer would see
+// against the *built* bullmq-memory-backend package (as an npm consumer would see
 // it) and runs each one with Node. A block passes when it exits with code 0 on
 // its own within the timeout, so a leaked handle (an unclosed Worker, a timer)
 // fails the check. Also smoke-tests the CommonJS entry point.
@@ -58,13 +58,13 @@ for (let i = 0; i < files.length; i++) {
 // CommonJS consumers (e.g. Jest) resolve the `require` export condition.
 const cjs = spawnSync(
   process.execPath,
-  ['-e', "const m = require('@bulllite/memory'); if (typeof m.createMemoryBackend !== 'function') process.exit(1);"],
+  ['-e', "const m = require('bullmq-memory-backend'); if (typeof m.createMemoryBackend !== 'function') process.exit(1);"],
   { cwd: root, encoding: 'utf8' },
 );
 if (cjs.status !== 0) {
   failed++;
-  console.log(`FAIL require('@bulllite/memory')\n${cjs.stderr}`);
-} else console.log("ok   require('@bulllite/memory') (CommonJS)");
+  console.log(`FAIL require('bullmq-memory-backend')\n${cjs.stderr}`);
+} else console.log("ok   require('bullmq-memory-backend') (CommonJS)");
 
 if (failed) {
   console.error(`${failed} README check(s) failed`);

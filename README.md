@@ -2,32 +2,31 @@
 
 **Run real BullMQ 6 `Queue` / `Worker` / `QueueEvents` without a Redis server.**
 
-`@bulllite/memory` is an in-memory backend for BullMQ's `IQueueBackend` /
+`bullmq-memory-backend` is an in-memory backend for BullMQ's `IQueueBackend` /
 `withBackend()` abstraction. Your code and your tests keep using BullMQ's own
 classes; only the datastore underneath is swapped for a fast, deterministic,
 in-process one. Built for test suites and local development.
 
 > [!WARNING]
-> **Experimental (v0.1.0-alpha).** No production guarantees. Not a Redis
+> **Experimental alpha (v0.1.0-alpha.0).** No production guarantees. Not a Redis
 > replacement, not durable, not multi-process.
 >
-> **Unofficial community project; not affiliated with BullMQ** or Taskforce.sh.
+> **Unofficial community project; not affiliated with BullMQ or Taskforce.sh.**
 
 ## Install
 
 ```bash
-npm install --save-dev bullmq@6.4.0 @bulllite/memory
+npm install -D bullmq bullmq-memory-backend
 ```
 
-(`@bulllite/memory` is not published to npm yet; until then build it from this
-repository: `pnpm install && pnpm build`.) ESM and CommonJS are both shipped;
-Node.js 20, 22 and 24 are tested.
+The peer dependency is pinned to `bullmq@6.4.0`, the only tested BullMQ version.
+ESM and CommonJS are both shipped; Node.js 20, 22 and 24 are tested.
 
 ## Quick start
 
 ```ts
 import { withBackend } from 'bullmq';
-import { createMemoryBackend } from '@bulllite/memory';
+import { createMemoryBackend } from 'bullmq-memory-backend';
 
 const { Queue, Worker, QueueEvents } = withBackend(createMemoryBackend);
 const connection = { namespace: 'demo' }; // instances with the same namespace share jobs
@@ -52,7 +51,7 @@ connection options are then ignored; nothing connects to Redis.
 
 ```ts
 import { Queue, Worker, setDefaultBackendFactory } from 'bullmq';
-import { createMemoryBackend, resetMemoryStore } from '@bulllite/memory';
+import { createMemoryBackend, resetMemoryStore } from 'bullmq-memory-backend';
 
 setDefaultBackendFactory(createMemoryBackend); // e.g. in vitest/jest setupFiles
 
@@ -86,7 +85,7 @@ setDefaultBackendFactory(); // back to Redis
 
 ```ts
 import { withBackend } from 'bullmq';
-import { createMemoryBackend, memoryNamespaces, resetMemoryStore } from '@bulllite/memory';
+import { createMemoryBackend, memoryNamespaces, resetMemoryStore } from 'bullmq-memory-backend';
 
 const { Queue } = withBackend(createMemoryBackend);
 

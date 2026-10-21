@@ -1,4 +1,4 @@
-# BullMQ's own test suite on `@bulllite/memory`
+# BullMQ's own test suite on `bullmq-memory-backend`
 
 `pnpm conformance` (script: `conformance/run.mjs`) copies `src/` and `tests/` of a
 `taskforcesh/bullmq` checkout at tag `v6.4.0` (cloned, or `BULLMQ_SRC=<path>`) into

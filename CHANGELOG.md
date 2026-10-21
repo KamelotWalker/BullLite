@@ -1,6 +1,6 @@
 # Changelog
 
-## @bulllite/memory 0.1.0-alpha.0 (unreleased)
+## bullmq-memory-backend 0.1.0-alpha.0 (unreleased)
 
 First experimental release. Tested with `bullmq@6.4.0` on Node.js 20, 22, 24.
 

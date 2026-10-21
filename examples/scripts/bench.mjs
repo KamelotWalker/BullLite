@@ -3,7 +3,7 @@
 // 1. 20 jobs: time from the first Queue.add to the 20th `completed` (one worker, concurrency 1).
 // 2. QueueEvents: per-job latency from Queue.add to the QueueEvents `completed` event (20 jobs, median/max).
 import { withBackend } from 'bullmq';
-import { createMemoryBackend } from '@bulllite/memory';
+import { createMemoryBackend } from 'bullmq-memory-backend';
 
 const { Queue, Worker, QueueEvents } = withBackend(createMemoryBackend);
 const connection = { namespace: 'bench' };

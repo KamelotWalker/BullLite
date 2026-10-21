@@ -1,4 +1,4 @@
-// Runs BullMQ v6.4.0's own shared test suite against @bulllite/memory.
+// Runs BullMQ v6.4.0's own shared test suite against bullmq-memory-backend.
 //
 //   BULLMQ_SRC=/path/to/bullmq-checkout-at-v6.4.0 node run.mjs [file filters...]
 //
@@ -134,7 +134,7 @@ for (const file of results.testResults) {
 }
 rows.sort((a, b) => a[0].localeCompare(b[0]));
 const lines = [
-  `# BullMQ ${TAG} shared suite on @bulllite/memory`,
+  `# BullMQ ${TAG} shared suite on bullmq-memory-backend`,
   '',
   `Ran ${new Date().toISOString()} on Node ${process.version}.`,
   '',

@@ -210,15 +210,15 @@ importers:
 
   examples:
     devDependencies:
-      '@bulllite/memory':
-        specifier: workspace:*
-        version: link:../packages/memory
       '@types/node':
         specifier: ^22.0.0
         version: 22.20.5
       bullmq:
         specifier: 6.4.0
         version: 6.4.0(ioredis@5.11.1)(pg@8.23.1)(redis@6.3.0)
+      bullmq-memory-backend:
+        specifier: workspace:*
+        version: link:../packages/memory
       typescript:
         specifier: ^5.9.0
         version: 5.9.3

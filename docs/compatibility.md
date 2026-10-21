@@ -2,7 +2,7 @@
 
 English, source-verified against `bullmq@6.4.0` (git tag `v6.4.0`, commit `253bc4b1acd9c6030c01817b38ae65e067666ed4`, https://github.com/taskforcesh/bullmq/tree/v6.4.0).
 
-§0 is the **current** status of `@bulllite/memory` (v0.1.0-alpha). §1–§8 are the Phase 0 contract inventory; their "Prio" columns are the original plan and are kept for reference.
+§0 is the **current** status of `bullmq-memory-backend` (v0.1.0-alpha). §1–§8 are the Phase 0 contract inventory; their "Prio" columns are the original plan and are kept for reference.
 
 Conventions: `qb:N` = `src/interfaces/queue-backend.ts:N`; `rel:N` = `src/interfaces/relay-backend.ts:N`; all other paths are relative to `src/` of the tag. `pg:N` = `src/postgres/postgres-queue-backend.ts:N`. Caller line numbers come from a scripted scan of `src/classes/*.ts` and `src/utils/*.ts` (excluding the Redis/Postgres backends themselves); a member showing no caller is exposed publicly by a high-level class only through a path I did not trace (marked "—").
 
@@ -10,7 +10,7 @@ Honesty rule (PROJECT.md): a member that is not implemented MUST throw a clear `
 
 ---
 
-## 0. `@bulllite/memory` v0.1.0-alpha — per-member status
+## 0. `bullmq-memory-backend` v0.1.0-alpha — per-member status
 
 **Supported** = real behaviour, exercised through the real BullMQ classes by `packages/memory/test` and/or BullMQ's own shared suite (`docs/conformance.md`). **Experimental** = implemented, but with a documented semantic gap. **Unsupported** = rejects with `UnsupportedError` (`.method` names the member); `forQueue` throws synchronously. Totals: **63 Supported, 4 Experimental, 23 Unsupported = 90**.
 

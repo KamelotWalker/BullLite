@@ -6,7 +6,7 @@ export class UnsupportedError extends Error {
   readonly method: string;
   constructor(method: string, detail?: string) {
     super(
-      `@bulllite/memory does not support ${detail ?? `IQueueBackend.${method}()`}. ` +
+      `bullmq-memory-backend does not support ${detail ?? `IQueueBackend.${method}()`}. ` +
         'See docs/compatibility.md for the supported subset.',
     );
     this.name = 'UnsupportedError';

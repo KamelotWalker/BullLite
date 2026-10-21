@@ -1,8 +1,12 @@
 {
-  "name": "@bulllite/memory",
+  "name": "bullmq-memory-backend",
   "version": "0.1.0-alpha.0",
-  "description": "Experimental in-memory backend for BullMQ 6: run real Queue/Worker/QueueEvents in tests without Redis. Unofficial community project; not affiliated with BullMQ.",
+  "description": "Unofficial in-memory, Redis-free backend for BullMQ v6 IQueueBackend, for testing and local development.",
   "license": "MIT",
+  "author": "KamelotWalker",
+  "homepage": "https://github.com/KamelotWalker/BullLite#readme",
+  "bugs": { "url": "https://github.com/KamelotWalker/BullLite/issues" },
+  "publishConfig": { "access": "public", "tag": "alpha" },
   "type": "module",
   "main": "./dist/cjs/index.js",
   "module": "./dist/esm/index.js",
@@ -23,7 +27,8 @@
   "files": [
     "dist",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "CHANGELOG.md"
   ],
   "sideEffects": false,
   "engines": {
@@ -32,7 +37,7 @@
   "keywords": [
     "bullmq",
     "queue",
-    "memory",
+    "in-memory",
     "testing",
     "backend",
     "redis-free"
@@ -44,6 +49,7 @@
   },
   "scripts": {
     "build": "node scripts/build.mjs",
+    "prepack": "node scripts/build.mjs",
     "test": "node scripts/build.mjs && vitest run",
     "typecheck": "tsc --noEmit"
   },

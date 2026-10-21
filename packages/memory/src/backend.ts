@@ -18,6 +18,7 @@ import type {
   RetryOptions,
   StreamReadRaw,
 } from 'bullmq';
+import { defer } from './defer.ts';
 import { finishedError, UnsupportedError } from './errors.ts';
 import {
   acquireNamespace,
@@ -121,6 +122,10 @@ class MemoryBackend extends EventEmitter {
   private blockingDisconnected = false;
   private cancelJobWait: (() => void) | undefined;
   private cancelEventWait: (() => void) | undefined;
+  /** Operations issued before the simulated handshake completed (cf. ioredis' offline queue). */
+  private readonly queuedOps: (() => void)[] = [];
+  private isConnected = false;
+  private readonly connected: Promise<void>;
 
   constructor(
     queueName: string,
@@ -144,16 +149,46 @@ class MemoryBackend extends EventEmitter {
     else if (factoryOptions.blocking) name = this.clientName(':qe');
     this.client = { name };
     this.ns.clients.add(this.client);
+    // Like a new client connection, an instance can execute nothing until one
+    // macrotask after it was created. This keeps BullMQ's implicit Redis-era
+    // ordering: a worker that is already running beats one created just now.
+    this.connected = new Promise((resolve) =>
+      defer(() => {
+        this.isConnected = true;
+        for (const op of this.queuedOps.splice(0)) op();
+        resolve();
+      }),
+    );
   }
 
-  /** Runs a synchronous store transition as one atomic step. */
+  /**
+   * Runs a synchronous store transition as one atomic step. The result is
+   * delivered on a later macrotask (see `defer`), like a reply from a
+   * datastore: code written against Redis relies on every `await backend.op()`
+   * yielding to the event loop (e.g. a Worker registers a job with its lock
+   * manager while the caller of a getter is still waiting for the reply).
+   */
   private run<T>(fn: () => T): Promise<T> {
-    if (this.closed) return Promise.reject(new Error('Connection is closed.'));
-    try {
-      return Promise.resolve(fn());
-    } catch (err) {
-      return Promise.reject(err);
-    }
+    return new Promise<T>((resolve, reject) => {
+      const exec = () => {
+        if (this.closed) {
+          defer(() => reject(new Error('Connection is closed.')));
+          return;
+        }
+        try {
+          const value = fn();
+          defer(() => resolve(value));
+        } catch (err) {
+          defer(() => reject(err));
+        }
+      };
+      if (this.isConnected) exec();
+      else this.queuedOps.push(exec);
+    });
+  }
+
+  private reply<T>(value: T): Promise<T> {
+    return new Promise<T>((resolve) => defer(() => resolve(value)));
   }
 
   // ---- lifecycle -----------------------------------------------------------
@@ -162,8 +197,9 @@ class MemoryBackend extends EventEmitter {
     return this.closingPromise;
   }
 
+  /** Resolves once the simulated connection handshake has completed (see the constructor). */
   waitUntilReady(): Promise<void> {
-    return Promise.resolve();
+    return this.connected;
   }
 
   close(_force?: boolean): Promise<void> {
@@ -465,6 +501,8 @@ class MemoryBackend extends EventEmitter {
   retryJob(jobId: string, lifo: boolean, token = '0', opts: RetryJobOpts = {}): Promise<void> {
     return this.run(() => {
       const job = this.requireActive(jobId, token, 'retryJob');
+      // retryJob-11.lua promotes due delayed jobs before re-queueing the retried one.
+      this.promoteDue(Date.now());
       this.applyFields(job, opts.fieldsToUpdate);
       job.attemptsMade++;
       this.store.enqueueClaimable(job, lifo && job.priority === 0);
@@ -635,11 +673,10 @@ class MemoryBackend extends EventEmitter {
           break;
         case 'wait':
         case 'waiting':
-        case 'paused':
         case 'prioritized':
         case 'delayed':
         case 'active': {
-          const internal: MemoryJobState = state === 'waiting' || state === 'paused' ? 'wait' : state;
+          const internal: MemoryJobState = state === 'waiting' ? 'wait' : state;
           candidates = this.store
             .ordered(internal)
             .filter((j) => j.timestamp <= timestamp && !(j.lock && j.lock.until > now));
@@ -726,7 +763,8 @@ class MemoryBackend extends EventEmitter {
       job.priority = priority;
       job.opts = { ...job.opts, priority };
       if (job.state === 'wait' || job.state === 'prioritized') {
-        this.store.enqueueClaimable(job, lifo && priority === 0);
+        // Redis: lifo puts the job at the head of its list / of its priority group.
+        this.store.enqueueClaimable(job, lifo);
         this.store.signalJobs();
       }
     });
@@ -737,7 +775,7 @@ class MemoryBackend extends EventEmitter {
       const job = this.store.jobs.get(jobId);
       if (!job) return 1; // Redis removeJob-2.lua: nothing to remove counts as removed
       if (job.lock && job.lock.until > Date.now()) return 0;
-      const prev = job.state === 'wait' && this.store.paused ? 'paused' : job.state;
+      const prev = job.state;
       this.store.delete(job);
       this.store.publish('removed', { jobId, prev });
       return 1;
@@ -781,12 +819,13 @@ class MemoryBackend extends EventEmitter {
     return this.run(() => {
       const actual = this.store.jobs.get(jobId)?.state;
       switch (state) {
+        // BullMQ 6 pauses with a meta flag only: paused jobs stay in `wait`, and the
+        // legacy `paused` list (pre-v6 data) never exists in this backend.
         case 'wait':
-          return actual === 'wait' && !this.store.paused;
-        case 'paused':
-          return actual === 'wait' && this.store.paused;
         case 'waiting':
           return actual === 'wait';
+        case 'paused':
+          return false;
         case 'active':
         case 'prioritized':
         case 'delayed':
@@ -848,14 +887,11 @@ class MemoryBackend extends EventEmitter {
 
   getCounts(types: JobType[]): Promise<number[]> {
     return this.run(() => {
-      const paused = this.store.paused;
       return types.map((type) => {
         switch (type as string) {
           case 'wait':
           case 'waiting':
-            return paused ? 0 : this.store.count('wait');
-          case 'paused':
-            return paused ? this.store.count('wait') : 0;
+            return this.store.count('wait');
           case 'active':
           case 'prioritized':
           case 'delayed':
@@ -882,14 +918,11 @@ class MemoryBackend extends EventEmitter {
 
   getRanges(types: JobType[], start = 0, end = -1, asc = false): Promise<[string][]> {
     return this.run(() => {
-      const paused = this.store.paused;
       const result = types.map((type) => {
         switch (type as string) {
           case 'wait':
           case 'waiting':
-            return paused ? [] : this.listRange('wait', start, end, asc);
-          case 'paused':
-            return paused ? this.listRange('wait', start, end, asc) : [];
+            return this.listRange('wait', start, end, asc);
           case 'active':
             return this.listRange('active', start, end, asc);
           case 'prioritized':
@@ -1002,7 +1035,8 @@ class MemoryBackend extends EventEmitter {
    * the first one. Resolves `null` on timeout or when the instance closes.
    */
   async readEvents(id: string, blockTimeout: number): Promise<StreamReadRaw> {
-    if (this.closingPromise) return null as unknown as StreamReadRaw;
+    if (!this.isConnected) await this.connected;
+    if (this.closingPromise) return this.reply(null as unknown as StreamReadRaw);
     const [ms, seq] = parseStreamId(id === '$' ? this.dollarCursor : id);
     let events = this.store.eventsAfter(ms, seq);
     if (events.length === 0) {
@@ -1022,7 +1056,7 @@ class MemoryBackend extends EventEmitter {
       events = this.store.eventsAfter(ms, seq);
     }
     if (events.length === 0) return null as unknown as StreamReadRaw;
-    return [[this.keys.events!, events.map((e) => [e.id, [...e.fields]])]] as unknown as StreamReadRaw;
+    return this.reply([[this.keys.events!, events.map((e) => [e.id, [...e.fields]])]] as unknown as StreamReadRaw);
   }
 
   // ---- blocking wait -----------------------------------------------------------
@@ -1040,9 +1074,10 @@ class MemoryBackend extends EventEmitter {
    * job's due time) or when interrupted by `disconnectBlocking`/`close`.
    */
   waitForJob(blockTimeout: number): Promise<Marker | null> {
-    if (this.closingPromise || this.blockingDisconnected) return Promise.resolve(null);
+    if (!this.isConnected) return this.connected.then(() => this.waitForJob(blockTimeout));
+    if (this.closingPromise || this.blockingDisconnected) return this.reply(null);
     const now = Date.now();
-    if (this.claimableNow(now)) return Promise.resolve(CHECK_NOW);
+    if (this.claimableNow(now)) return this.reply(CHECK_NOW);
     let waitMs = Math.max(blockTimeout, 0) * 1000;
     const due = this.store.nextDelayedDue();
     if (due !== undefined) waitMs = Math.min(waitMs, due - now);

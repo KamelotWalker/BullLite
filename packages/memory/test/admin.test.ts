@@ -13,9 +13,9 @@ describe('pause / resume', () => {
     await queue.add('a', {});
     await sleep(150);
     expect(seen).toEqual([]);
-    // Like BullMQ 6 on Redis (wait list renamed to paused): paused jobs are not counted as waiting.
-    expect(await queue.getJobCounts('waiting', 'delayed')).toEqual({ waiting: 0, delayed: 0 });
-    expect(await queue.count()).toBe(0);
+    // BullMQ 6 pauses with a meta flag only: the job stays (and is counted) in `wait`.
+    expect(await queue.getJobCounts('waiting')).toEqual({ waiting: 1 });
+    expect(await queue.count()).toBe(1);
     expect(await queue.getJobState('1')).toBe('waiting');
 
     const done = once(worker, 'completed');

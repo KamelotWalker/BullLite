@@ -1,14 +1,108 @@
 # BullMQ 6.4.0 backend contract — compatibility inventory
 
-Phase 0 deliverable. English, source-verified against `bullmq@6.4.0` (git tag `v6.4.0`, commit `253bc4b1acd9c6030c01817b38ae65e067666ed4`, https://github.com/taskforcesh/bullmq/tree/v6.4.0).
+English, source-verified against `bullmq@6.4.0` (git tag `v6.4.0`, commit `253bc4b1acd9c6030c01817b38ae65e067666ed4`, https://github.com/taskforcesh/bullmq/tree/v6.4.0).
+
+§0 is the **current** status of `@bulllite/memory` (v0.1.0-alpha). §1–§8 are the Phase 0 contract inventory; their "Prio" columns are the original plan and are kept for reference.
 
 Conventions: `qb:N` = `src/interfaces/queue-backend.ts:N`; `rel:N` = `src/interfaces/relay-backend.ts:N`; all other paths are relative to `src/` of the tag. `pg:N` = `src/postgres/postgres-queue-backend.ts:N`. Caller line numbers come from a scripted scan of `src/classes/*.ts` and `src/utils/*.ts` (excluding the Redis/Postgres backends themselves); a member showing no caller is exposed publicly by a high-level class only through a path I did not trace (marked "—").
 
 Honesty rule (PROJECT.md): a member that is not implemented MUST throw a clear `unsupported` error. The Postgres backend itself does this via `notImplemented()` (`pg:160`).
 
-Status legend for the priority column:
+---
+
+## 0. `@bulllite/memory` v0.1.0-alpha — per-member status
+
+**Supported** = real behaviour, exercised through the real BullMQ classes by `packages/memory/test` and/or BullMQ's own shared suite (`docs/conformance.md`). **Experimental** = implemented, but with a documented semantic gap. **Unsupported** = rejects with `UnsupportedError` (`.method` names the member); `forQueue` throws synchronously. Totals: **63 Supported, 4 Experimental, 23 Unsupported = 90**.
+
+Option-level rejections (also `UnsupportedError`, nothing is stored): `addJob`/`addJobs` with `parent`/`parentKey` (flows), `deduplication`/`debounce`, a scheduler `repeatJobKey`; `setQueueMeta` with `max`/`duration` (`Queue.setGlobalRateLimit`); Worker options `limiter` and `metrics` (thrown by the factory, i.e. by `new Worker(...)`).
+
+| # | Member | Status | Notes |
+|---|---|---|---|
+| 1 | `waitUntilReady` | Supported | resolves one macrotask after construction (simulated handshake; ops issued earlier are queued, like ioredis' offline queue) |
+| 2 | `close` | Supported | interrupts `waitForJob`/`readEvents`, releases the namespace reference |
+| 3 | `closing` | Supported | |
+| 4 | `disconnect` | Supported | = `close(true)` |
+| 5 | `setName` | Supported | name is reported by `getClientList` |
+| 6 | `minimumBlockTimeout` | Supported | 0.001 s |
+| 7 | `maximumBlockTimeout` | Supported | 3600 s (the wait re-arms to the next delayed job itself) |
+| 8–10 | `on` / `once` / `removeListener` | Supported | EventEmitter; emits `close` |
+| 11 | `forQueue` | Unsupported | FlowProducer only |
+| 12 | `qualifiedName` | Supported | `<prefix>:<queue>` like Redis |
+| 13 | `keys` | Supported | BullMQ `QueueKeys` for the prefix |
+| 14 | `toKey` | Supported | |
+| 15 | `parseNodeKey` | Experimental | pure string helper; only flows use it, and flows are unsupported |
+| 16 | `clientName` | Supported | |
+| 17 | `addJob` | Supported | wait / prioritized / delayed routing, `lifo`, duplicate id → existing id + `duplicated` event |
+| 18 | `addJobs` | Supported | all-or-nothing validation |
+| 19 | `addFlow` | Unsupported | |
+| 20 | `addJobScheduler` | Unsupported | |
+| 21 | `moveToActive` | Supported | promotes due delayed jobs; honours pause and global concurrency; empty result carries the next delayed timestamp |
+| 22 | `moveToCompleted` | Supported | lock/state checks with BullMQ error codes −1/−2/−3/−6, retention, fused fetch-next, `drained` |
+| 23 | `moveToFailed` | Supported | same + `retries-exhausted` |
+| 24 | `moveToDelayed` | Supported | backoff retries and `job.moveToDelayed` |
+| 25 | `moveToWaitingChildren` | Unsupported | |
+| 26 | `moveJobFromActiveToWait` | Experimental | re-queues at the head; always reports "no limiter window" (0) because rate limiting is unsupported |
+| 27 | `retryJob` | Supported | promotes due delayed jobs first, like `retryJob-11.lua` |
+| 28 | `retryFinishedJob` | Supported | `job.retry()` incl. `resetAttemptsMade/Started` |
+| 29 | `promote` | Supported | |
+| 30 | `moveStalledJobsToWait` | Supported | two-phase mark/sweep, throttled by `stalledInterval`, deferred failure past `maxStalledCount` |
+| 31 | `retryFinishedJobs` | Supported | `Queue.retryJobs` |
+| 32 | `promoteJobs` | Supported | |
+| 33 | `pause` | Supported | BullMQ 6 semantics: meta flag only, jobs stay in `wait` |
+| 34 | `drain` | Supported | |
+| 35 | `cleanJobsByState` | Supported | `cleaned` event; locked active jobs are skipped |
+| 36 | `obliterate` | Supported | requires pause; refuses active jobs unless `force`; resets the id counter |
+| 37 | `removeOrphanedJobs` | Supported | returns 0: a job and its state are one record, orphans cannot exist |
+| 38 | `extendLock` | Supported | |
+| 39 | `extendLocks` | Supported | also clears the stalled mark, like Redis |
+| 40 | `updateData` | Supported | |
+| 41 | `updateProgress` | Supported | `progress` event |
+| 42 | `addLog` | Supported | `keepLogs` trimming |
+| 43 | `clearLogs` | Supported | |
+| 44 | `changeDelay` | Supported | |
+| 45 | `changePriority` | Supported | `lifo` moves to the head of the priority group |
+| 46 | `remove` | Supported | 0 while locked; `removeChildren` has no effect (no flows) |
+| 47 | `removeUnprocessedChildren` | Unsupported | |
+| 48 | `removeChildDependency` | Unsupported | |
+| 49 | `removeDeduplicationKey` | Unsupported | |
+| 50 | `deleteDeduplicationKey` | Unsupported | |
+| 51–57 | job-scheduler members (`updateJobSchedulerNextMillis`, `removeJobScheduler`, `getJobScheduler`, `isJobScheduler`, `getJobSchedulerData`, `getJobSchedulersRange`, `getJobSchedulersCount`) | Unsupported | 7 members |
+| 58 | `getState` | Supported | incl. `prioritized` |
+| 59 | `isFinished` | Supported | `waitUntilFinished` |
+| 60 | `isMaxed` | Supported | |
+| 61 | `isJobInState` | Supported | `paused` is always false (BullMQ 6 keeps paused jobs in `wait`) |
+| 62 | `getJobData` | Supported | returns a copy |
+| 63 | `getDeduplicationJobId` | Unsupported | |
+| 64 | `getJobLogs` | Supported | |
+| 65 | `getRateLimitTtl` | Experimental | no limiter can exist: 0 with `maxJobs`, else −2 (Redis PTTL of a missing key) |
+| 66 | `getCounts` | Supported | |
+| 67 | `getCountsPerPriority` | Supported | |
+| 68 | `getRanges` | Supported | Redis list/zset ordering and `asc` semantics |
+| 69 | `getDependencyCounts` | Unsupported | |
+| 70 | `getDependencies` | Unsupported | |
+| 71 | `getProcessedChildrenValues` | Unsupported | |
+| 72 | `getIgnoredChildrenFailures` | Unsupported | |
+| 73 | `getMetrics` | Unsupported | |
+| 74 | `getClientList` | Supported | open Workers (`:w:<name>`) and QueueEvents of the namespace |
+| 75 | `paginate` | Unsupported | |
+| 76 | `setQueueMeta` | Supported | except `max`/`duration` (rate limit) |
+| 77–81 | `getQueueMetaField`, `getQueueMetaFields`, `getQueueMeta`, `removeQueueMetaFields`, `hasQueueMetaField` | Supported | 5 members |
+| 82 | `setRateLimit` | Unsupported | |
+| 83 | `removeRateLimitKey` | Experimental | returns 0: the key can never exist |
+| 84 | `removeDeprecatedPriorityKey` | Supported | returns 0: the legacy key never exists |
+| 85 | `trimEvents` | Supported | |
+| 86 | `publishEvent` | Supported | |
+| 87 | `readEvents` | Supported | XREAD shape, `'$'` = after this QueueEvents was created, resume by id, blocking with timeout, trimmed to `streams.events.maxLen` |
+| 88 | `waitForJob` | Supported | check-and-block without lost wake-ups; re-armed to the next delayed job |
+| 89 | `disconnectBlocking` | Supported | |
+| 90 | `reconnectBlocking` | Supported | |
+
+Store lifetime (PROJECT.md §16 Q4, decided): each backend instance holds one reference on its namespace; the namespace (all its queues) is dropped when the last owning instance closes, unless an instance opened it with `connection.retain: true`; `resetMemoryStore(namespace?)` clears data in place and drops the pin. Rationale: tests that close what they open get isolation for free; code that relies on data surviving with no open instance must opt in explicitly. Operations on a closed instance reject with `Connection is closed.` like ioredis.
+
+---
+
+Status legend for the Phase 0 "Prio" column below:
 `v0.1` = v0.1-required (Queue.add → Worker → completed/failed, concurrency, duplicate jobId, close). `v0.2` = v0.2. `later`. `oos` = out-of-scope.
-"v0.1-required" means *real behaviour must exist*. Every member must exist on the object for the TypeScript contract; non-v0.1 members may throw `unsupported` in v0.1 (never fake success).
 
 ---
 

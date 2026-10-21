@@ -481,34 +481,34 @@ Repo için **pnpm workspaces + TypeScript strict + Vitest + ESLint + Prettier + 
 
 ### Faz 0 — Teknik fizibilite / spike
 
-- [ ] BullMQ 6'nın hedef sürümünü sabitle.
-- [ ] `IQueueBackend` metod envanterini çıkar (isim / çağıran sınıf / atomiklik / öncelik).
-- [ ] Gerçek `withBackend()` kullanımı için minimal factory prototipi oluştur.
-- [ ] `Queue.add` → `Worker` → `completed` yolunu tek Node sürecinde çalıştır.
-- [ ] `close()` ve import/type kontrolünü doğrula.
-- [ ] Entegrasyon risklerini ve uygulanabilir kapsamı `docs/compatibility.md` dosyasına yaz.
+- [x] BullMQ 6'nın hedef sürümünü sabitle.
+- [x] `IQueueBackend` metod envanterini çıkar (isim / çağıran sınıf / atomiklik / öncelik).
+- [x] Gerçek `withBackend()` kullanımı için minimal factory prototipi oluştur.
+- [x] `Queue.add` → `Worker` → `completed` yolunu tek Node sürecinde çalıştır.
+- [x] `close()` ve import/type kontrolünü doğrula.
+- [x] Entegrasyon risklerini ve uygulanabilir kapsamı `docs/compatibility.md` dosyasına yaz.
 
 **Çıkış kriteri:** Hem runtime hem TypeScript derlemesiyle doğrulanmış çalışan örnek. Başarısızsa hedef mimari yeniden değerlendirilir.
 
 ### Faz 1 — Memory MVP / v0.1.0-alpha
 
-- [ ] İzole namespace ve paylaşılan store.
-- [ ] Add / claim / process / complete / fail.
-- [ ] Temel job state ve job ID davranışı.
-- [ ] Worker concurrency ve kaynak temizliği.
-- [ ] Hata yönetimi; desteklenmeyen API'ler için açık uyumluluk listesi.
-- [ ] README örneği, CI, temel integration test.
+- [x] İzole namespace ve paylaşılan store.
+- [x] Add / claim / process / complete / fail.
+- [x] Temel job state ve job ID davranışı.
+- [x] Worker concurrency ve kaynak temizliği.
+- [x] Hata yönetimi; desteklenmeyen API'ler için açık uyumluluk listesi.
+- [x] README örneği, CI, temel integration test.
 
 **Çıkış kriteri:** Belgelenen temel senaryolar gerçek BullMQ sınıflarıyla Redis olmadan çalışır. Deneysel etiket korunur.
 
 ### Faz 2 — Memory kalite / v0.2.x
 
-- [ ] Delayed jobs için güvenilir zamanlama.
-- [ ] Retry + fixed/exponential backoff.
+- [x] Delayed jobs için güvenilir zamanlama.
+- [x] Retry + fixed/exponential backoff.
 - [ ] Priority ve deduplication semantiği.
-- [ ] Event ve lock davranışlarının doğrulanması.
+- [x] Event ve lock davranışlarının doğrulanması.
 - [ ] Fake-clock temelli deterministik testler.
-- [ ] BullMQ adapter conformance testlerinin uygulanabilir kapsamını karşıla.
+- [x] BullMQ adapter conformance testlerinin uygulanabilir kapsamını karşıla.
 - [ ] Bellek artışı, timer sızıntısı, concurrency race testleri.
 
 **Çıkış kriteri:** Her desteklenen API için belgelenmiş conformance testi ve bilinen sınırlamalar.
@@ -684,15 +684,15 @@ BullMQ-compatible backends without a Redis server.
 
 ### İlk teslim (v0.1 alpha) kabul kriterleri
 
-- [ ] Tek komutla kurulan memory backend paketi.
-- [ ] Gerçek BullMQ 6 `Queue` ve `Worker` ile add → process → complete çalışıyor.
-- [ ] `concurrency`, duplicate ID ve hata durumu için testler var.
-- [ ] `close()` handle bırakmıyor.
+- [x] Tek komutla kurulan memory backend paketi.
+- [x] Gerçek BullMQ 6 `Queue` ve `Worker` ile add → process → complete çalışıyor.
+- [x] `concurrency`, duplicate ID ve hata durumu için testler var.
+- [x] `close()` handle bırakmıyor.
 - [ ] En az Linux üzerinde CI geçiyor.
-- [ ] README'deki kod örnekleri CI'da derlenip çalıştırılıyor.
-- [ ] `docs/compatibility.md` açıkça hangi BullMQ API'lerinin desteklendiğini listeliyor.
-- [ ] Redis kurulumuna ihtiyaç duyulmuyor.
-- [ ] Proje *experimental* olarak etiketleniyor; üretim garantisi verilmiyor.
+- [x] README'deki kod örnekleri CI'da derlenip çalıştırılıyor.
+- [x] `docs/compatibility.md` açıkça hangi BullMQ API'lerinin desteklendiğini listeliyor.
+- [x] Redis kurulumuna ihtiyaç duyulmuyor.
+- [x] Proje *experimental* olarak etiketleniyor; üretim garantisi verilmiyor.
 
 ### İlk PR başlığı
 

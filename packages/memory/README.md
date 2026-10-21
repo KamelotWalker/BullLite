@@ -1,6 +1,22 @@
-# @bulllite/memory (Phase 0 spike)
+# @bulllite/memory
 
-In-memory `IQueueBackend` for `bullmq@6.4.0`, used via `withBackend(createMemoryBackend)`.
-`connection: { namespace }` selects the isolation domain. Implemented: Queue.add -> Worker (single attempt) -> completed/failed,
-`getJob`/`getState`, lock renewal, stalled recovery. Everything else rejects with `UnsupportedError` naming the method.
-`scratch/` holds the call-recording tool used to measure which backend members the path needs (`node scratch/measure.ts`).
+Experimental in-memory backend for BullMQ 6 (`bullmq@6.4.0`): run real `Queue`,
+`Worker` and `QueueEvents` in tests and local development without a Redis server.
+
+**Unofficial community project; not affiliated with BullMQ.** No persistence,
+single process, no production guarantees.
+
+```ts
+import { withBackend } from 'bullmq';
+import { createMemoryBackend } from '@bulllite/memory';
+
+const { Queue, Worker } = withBackend(createMemoryBackend);
+const connection = { namespace: 'demo' };
+const queue = new Queue('emails', { connection });
+const worker = new Worker('emails', async (job) => job.data, { connection });
+await queue.add('send', { to: 'hello@example.com' });
+```
+
+Or keep your code unchanged and call `setDefaultBackendFactory(createMemoryBackend)`
+in your test setup. Support matrix, store lifetime (`retain`, `resetMemoryStore`)
+and limitations: https://github.com/KamelotWalker/BullLite#readme

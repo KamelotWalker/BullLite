@@ -41,26 +41,26 @@ Option-level rejections (also `UnsupportedError`, nothing is stored): `addJob`/`
 | 23 | `moveToFailed` | Supported | same + `retries-exhausted` |
 | 24 | `moveToDelayed` | Supported | backoff retries and `job.moveToDelayed` |
 | 25 | `moveToWaitingChildren` | Unsupported | |
-| 26 | `moveJobFromActiveToWait` | Experimental | re-queues at the head; always reports "no limiter window" (0) because rate limiting is unsupported |
+| 26 | `moveJobFromActiveToWait` | Experimental | Redis `removeLock` check (−2 missing/expired, −6 other owner), then re-queues at the head; always reports "no limiter window" (0) because rate limiting is unsupported |
 | 27 | `retryJob` | Supported | promotes due delayed jobs first, like `retryJob-11.lua` |
 | 28 | `retryFinishedJob` | Supported | `job.retry()` incl. `resetAttemptsMade/Started` |
 | 29 | `promote` | Supported | |
-| 30 | `moveStalledJobsToWait` | Supported | two-phase mark/sweep, throttled by `stalledInterval`, deferred failure past `maxStalledCount` |
+| 30 | `moveStalledJobsToWait` | Supported | two-phase mark/sweep, throttled by `stalledInterval`, deferred failure past `maxStalledCount`; recovered job goes to the head of `wait` (even if prioritized) with `waiting` then `stalled` events, like `moveJobToWait(…, "RPUSH")` |
 | 31 | `retryFinishedJobs` | Supported | `Queue.retryJobs` |
 | 32 | `promoteJobs` | Supported | |
 | 33 | `pause` | Supported | BullMQ 6 semantics: meta flag only, jobs stay in `wait` |
 | 34 | `drain` | Supported | |
-| 35 | `cleanJobsByState` | Supported | `cleaned` event; locked active jobs are skipped |
+| 35 | `cleanJobsByState` | Supported | age = first set of `finishedOn`/`processedOn`/`timestamp` (wait, active), `processedOn`/`timestamp` (delayed), `timestamp` (prioritized), `finishedOn` (completed/failed), as in `cleanJobsInSet-3.lua`; locked active jobs skipped; `cleaned` event |
 | 36 | `obliterate` | Supported | requires pause; refuses active jobs unless `force`; resets the id counter |
 | 37 | `removeOrphanedJobs` | Supported | returns 0: a job and its state are one record, orphans cannot exist |
-| 38 | `extendLock` | Supported | |
-| 39 | `extendLocks` | Supported | also clears the stalled mark, like Redis |
+| 38 | `extendLock` | Supported | an expired lock cannot be renewed (Redis key TTL) |
+| 39 | `extendLocks` | Supported | same; also clears the stalled mark, like Redis |
 | 40 | `updateData` | Supported | |
 | 41 | `updateProgress` | Supported | `progress` event |
 | 42 | `addLog` | Supported | `keepLogs` trimming |
 | 43 | `clearLogs` | Supported | |
 | 44 | `changeDelay` | Supported | |
-| 45 | `changePriority` | Supported | `lifo` moves to the head of the priority group |
+| 45 | `changePriority` | Supported | `lifo` moves to the head of the priority group; several head jobs tie-break by job id like Redis equal-score sorted-set members |
 | 46 | `remove` | Supported | 0 while locked; `removeChildren` has no effect (no flows) |
 | 47 | `removeUnprocessedChildren` | Unsupported | |
 | 48 | `removeChildDependency` | Unsupported | |
@@ -92,7 +92,7 @@ Option-level rejections (also `UnsupportedError`, nothing is stored): `addJob`/`
 | 84 | `removeDeprecatedPriorityKey` | Supported | returns 0: the legacy key never exists |
 | 85 | `trimEvents` | Supported | |
 | 86 | `publishEvent` | Supported | |
-| 87 | `readEvents` | Supported | XREAD shape, `'$'` = after this QueueEvents was created, resume by id, blocking with timeout, trimmed to `streams.events.maxLen` |
+| 87 | `readEvents` | Supported | XREAD shape; `'$'` = stream tail when the read is issued; resume by id; blocking with timeout; trimmed to `streams.events.maxLen` |
 | 88 | `waitForJob` | Supported | check-and-block without lost wake-ups; re-armed to the next delayed job |
 | 89 | `disconnectBlocking` | Supported | |
 | 90 | `reconnectBlocking` | Supported | |

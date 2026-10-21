@@ -10,7 +10,7 @@ namespace per test-file process.
 
 ## Latest local run (Node 24.22, Windows 11, 2026-10-21)
 
-**510 passed, 272 failed, 3 skipped** (785 tests in 23 files, ~75 s).
+**510 passed, 272 failed, 3 skipped** (785 tests in 23 files, ~75 s). Re-run after the review fixes (redis-parity tests): unchanged.
 
 Failure breakdown (classified from the failure messages):
 

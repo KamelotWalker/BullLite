@@ -56,6 +56,15 @@ interface DelayedEntry extends Entry {
   readonly order: number;
 }
 
+/**
+ * Redis prioritized score order: `priority * 2^32 + counter`; jobs pushed to the
+ * front of their priority group (pushBackJobWithPriority.lua) all get counter 0
+ * (`order` 0 here) and, with equal scores, sort lexicographically by job id.
+ */
+function comparePrioritized(a: { priority: number; order: number; id: string }, b: typeof a): number {
+  return a.priority - b.priority || a.order - b.order || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+}
+
 export interface StreamEvent {
   readonly ms: number;
   readonly seq: number;
@@ -87,9 +96,7 @@ export class QueueStore {
     failed: new Set(),
   };
   private readonly waitList = new Deque<Entry>();
-  private readonly prioritizedHeap = new Heap<PrioritizedEntry>(
-    (a, b) => a.priority - b.priority || a.order - b.order,
-  );
+  private readonly prioritizedHeap = new Heap<PrioritizedEntry>(comparePrioritized);
   private readonly delayedHeap = new Heap<DelayedEntry>((a, b) => a.dueAt - b.dueAt || a.order - b.order);
   private idCounter = 0;
   private ticketCounter = 0;
@@ -168,7 +175,7 @@ export class QueueStore {
     this.setState(job, 'prioritized');
     const ticket = ++this.ticketCounter;
     job.ticket = ticket;
-    job.order = front ? -ticket : ticket;
+    job.order = front ? 0 : ticket;
     job.lock = undefined;
     this.prioritizedHeap.push({ id: job.id, ticket, priority: job.priority, order: job.order });
     if (this.prioritizedHeap.length > 64 && this.prioritizedHeap.length > 2 * this.index.prioritized.size) {
@@ -235,7 +242,7 @@ export class QueueStore {
       case 'wait':
         return jobs.sort((a, b) => a.order - b.order);
       case 'prioritized':
-        return jobs.sort((a, b) => a.priority - b.priority || a.order - b.order);
+        return jobs.sort(comparePrioritized);
       case 'delayed':
         return jobs.sort((a, b) => a.dueAt - b.dueAt || a.order - b.order);
       case 'completed':

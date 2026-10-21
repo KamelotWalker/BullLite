@@ -115,8 +115,6 @@ class MemoryBackend extends EventEmitter {
   private readonly store: QueueStore;
   private readonly opts: BackendOptions;
   private readonly client: ClientEntry;
-  /** Event-stream position at construction; what `'$'` means for this instance. */
-  private readonly dollarCursor: string;
   private closingPromise: Promise<void> | undefined;
   private closed = false;
   private blockingDisconnected = false;
@@ -142,7 +140,6 @@ class MemoryBackend extends EventEmitter {
     const connection = opts.connection ?? {};
     this.ns = acquireNamespace(connection.namespace ?? DEFAULT_NAMESPACE, connection.retain === true);
     this.store = this.ns.queue(this.qualifiedName);
-    this.dollarCursor = this.store.lastEventId;
     // Same client names BullMQ's Redis/Postgres factories give workers and QueueEvents (Queue.getWorkers()).
     let name: string | undefined;
     if (factoryOptions.withBlockingConnection) name = this.clientName(opts.name ? `:w:${opts.name}` : '');
@@ -363,14 +360,18 @@ class MemoryBackend extends EventEmitter {
   private requireActive(jobId: string, token: string | undefined, command: string): StoredJob {
     const job = this.store.jobs.get(jobId);
     if (!job) throw finishedError(ErrorCode.JobNotExist, jobId, command, 'active');
-    if (token !== undefined && token !== '0') {
-      if (!job.lock || job.lock.until <= Date.now()) {
-        throw finishedError(ErrorCode.JobLockNotExist, jobId, command, 'active');
-      }
-      if (job.lock.token !== token) throw finishedError(ErrorCode.JobLockMismatch, jobId, command, 'active');
-    }
+    this.requireLock(job, token, command);
     if (job.state !== 'active') throw finishedError(ErrorCode.JobNotInState, jobId, command, 'active');
     return job;
+  }
+
+  /** Redis `removeLock` check: token '0' skips it; an expired lock counts as missing (key TTL). */
+  private requireLock(job: StoredJob, token: string | undefined, command: string): void {
+    if (token === undefined || token === '0') return;
+    if (!job.lock || job.lock.until <= Date.now()) {
+      throw finishedError(ErrorCode.JobLockNotExist, job.id, command, 'active');
+    }
+    if (job.lock.token !== token) throw finishedError(ErrorCode.JobLockMismatch, job.id, command, 'active');
   }
 
   moveToCompleted<T = any, R = any, N extends string = string>(
@@ -515,7 +516,10 @@ class MemoryBackend extends EventEmitter {
     return this.run(() => {
       const job = this.store.jobs.get(jobId);
       if (!job) throw finishedError(ErrorCode.JobNotExist, jobId, 'moveJobFromActiveToWait');
-      if (job.state === 'active' && (token === '0' || job.lock?.token === token)) {
+      // moveJobFromActiveToWait-9.lua: removeLock first (−2 missing/expired, −6 other owner) …
+      this.requireLock(job, token, 'moveJobFromActiveToWait');
+      // … then only an active job moves (LREM active); otherwise nothing happens.
+      if (job.state === 'active') {
         // Back to the head of its list (Redis RPUSH / pushBackJobWithPriority): it keeps its turn.
         this.store.enqueueClaimable(job, true);
         this.store.publish('waiting', { jobId, prev: 'active' });
@@ -574,7 +578,8 @@ class MemoryBackend extends EventEmitter {
 
   private extend(jobId: string, token: string, duration: number, now: number): boolean {
     const job = this.store.jobs.get(jobId);
-    if (job?.state !== 'active' || !job.lock || job.lock.token !== token) return false;
+    // An expired lock is gone (Redis key TTL): it cannot be renewed (extendLock-2.lua GET → nil).
+    if (job?.state !== 'active' || !job.lock || job.lock.token !== token || job.lock.until <= now) return false;
     job.lock.until = now + duration;
     job.stalledMarked = false; // Redis extendLock also SREMs the job from the stalled set
     return true;
@@ -604,7 +609,10 @@ class MemoryBackend extends EventEmitter {
         job.stalledMarked = false;
         job.stalledCounter++;
         if (job.stalledCounter > maxStalled) job.deferredFailure = STALLED_REASON;
-        store.enqueueClaimable(job);
+        // moveStalledJobsToWait-9.lua: moveJobToWait(…, "RPUSH") puts the job at the head of
+        // the plain wait list (even if it has a priority) and emits `waiting`, then `stalled`.
+        store.enqueueWait(job, true);
+        store.publish('waiting', { jobId: job.id, prev: 'active' });
         store.publish('stalled', { jobId: job.id });
       }
       for (const id of store.idsIn('active')) store.jobs.get(id)!.stalledMarked = true;
@@ -671,17 +679,23 @@ class MemoryBackend extends EventEmitter {
         case 'failed':
           candidates = this.store.ordered(state).filter((j) => (j.finishedOn ?? 0) <= timestamp);
           break;
+        // cleanJobsInSet-3.lua: the job's age is the first set field of the listed attributes,
+        // so a job processed (or retried) recently stays within the grace period.
         case 'wait':
         case 'waiting':
-        case 'prioritized':
-        case 'delayed':
-        case 'active': {
-          const internal: MemoryJobState = state === 'waiting' ? 'wait' : state;
-          candidates = this.store
-            .ordered(internal)
-            .filter((j) => j.timestamp <= timestamp && !(j.lock && j.lock.until > now));
+          candidates = this.store.ordered('wait').filter((j) => (j.finishedOn ?? j.processedOn ?? j.timestamp) <= timestamp);
           break;
-        }
+        case 'active': // cleanList: locked jobs are skipped
+          candidates = this.store
+            .ordered('active')
+            .filter((j) => (j.finishedOn ?? j.processedOn ?? j.timestamp) <= timestamp && !(j.lock && j.lock.until > now));
+          break;
+        case 'delayed':
+          candidates = this.store.ordered('delayed').filter((j) => (j.processedOn ?? j.timestamp) <= timestamp);
+          break;
+        case 'prioritized':
+          candidates = this.store.ordered('prioritized').filter((j) => j.timestamp <= timestamp);
+          break;
         default:
           return [];
       }
@@ -1030,14 +1044,17 @@ class MemoryBackend extends EventEmitter {
   }
 
   /**
-   * `XREAD BLOCK` equivalent: events strictly after `id` (`'$'` = after this
-   * instance was created), waiting up to `blockTimeout` ms (0 = forever) for
+   * `XREAD BLOCK` equivalent: events strictly after `id` (`'$'` = the tail when
+   * the read starts), waiting up to `blockTimeout` ms (0 = forever) for
    * the first one. Resolves `null` on timeout or when the instance closes.
    */
   async readEvents(id: string, blockTimeout: number): Promise<StreamReadRaw> {
+    // '$' = the stream tail when the XREAD is issued, i.e. at call time, even if the
+    // command then waits for the connect gate (a QueueEvents issues its first read
+    // right after construction, so events produced after it was created are seen).
+    const [ms, seq] = parseStreamId(id === '$' ? this.store.lastEventId : id);
     if (!this.isConnected) await this.connected;
     if (this.closingPromise) return this.reply(null as unknown as StreamReadRaw);
-    const [ms, seq] = parseStreamId(id === '$' ? this.dollarCursor : id);
     let events = this.store.eventsAfter(ms, seq);
     if (events.length === 0) {
       await new Promise<void>((resolve) => {

@@ -1,0 +1,24 @@
+{
+  "name": "@bulllite/conformance",
+  "private": true,
+  "type": "module",
+  "description": "Opt-in harness: runs BullMQ v6.4.0's own shared test suite against @bulllite/memory.",
+  "scripts": {
+    "conformance": "node run.mjs"
+  },
+  "devDependencies": {
+    "cron-parser": "5.10.2",
+    "ioredis": "5.11.1",
+    "moment": "2.31.0",
+    "msgpackr": "2.1.0",
+    "node-abort-controller": "3.1.1",
+    "pg": "8.23.1",
+    "progress": "2.0.3",
+    "redis": "6.3.0",
+    "rrule": "2.8.1",
+    "semver": "7.8.5",
+    "sinon": "22.1.0",
+    "tslib": "2.8.1",
+    "vitest": "4.1.12"
+  }
+}

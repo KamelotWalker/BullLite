@@ -1,5 +1,7 @@
 packages:
   - "packages/*"
+  - "examples"
+  - "conformance"
 minimumReleaseAgeExclude:
   - bullmq@6.4.0
 allowBuilds:

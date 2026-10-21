@@ -1,0 +1,15 @@
+{
+  "name": "@bulllite/examples",
+  "private": true,
+  "type": "module",
+  "description": "Extracts the TypeScript examples from README.md, typechecks them against the built @bulllite/memory and runs them.",
+  "scripts": {
+    "test": "node scripts/readme.mjs"
+  },
+  "devDependencies": {
+    "@bulllite/memory": "workspace:*",
+    "@types/node": "^22.0.0",
+    "bullmq": "6.4.0",
+    "typescript": "^5.9.0"
+  }
+}

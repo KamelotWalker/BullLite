@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: typecheck + tests (Node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [20, 22, 24]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4 # version comes from "packageManager" in package.json
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm typecheck
+      # Builds the package, runs the unit/behaviour suite, then compiles and runs
+      # every ```ts block of README.md against the built package.
+      - run: pnpm test
+
+  conformance:
+    # Report-only: runs BullMQ v6.4.0's own shared test suite against the memory
+    # backend. Many failures are expected (unsupported features); see docs/conformance.md.
+    name: BullMQ shared suite (report)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm conformance
+        env:
+          VITE_CONFIG_NATIVE_IGNORE_WARNING: 'true'
+      - if: always()
+        run: cat conformance/.work/summary.md >> "$GITHUB_STEP_SUMMARY"

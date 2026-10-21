@@ -4,7 +4,10 @@
   "type": "module",
   "packageManager": "pnpm@12.14.0",
   "scripts": {
-    "typecheck": "pnpm -r exec tsc --noEmit",
-    "test": "pnpm -r test"
+    "build": "pnpm --filter @bulllite/memory build",
+    "typecheck": "pnpm --filter @bulllite/memory typecheck",
+    "test": "pnpm --filter @bulllite/memory test && pnpm --filter @bulllite/examples test",
+    "test:readme": "pnpm --filter @bulllite/memory build && pnpm --filter @bulllite/examples test",
+    "conformance": "pnpm --filter @bulllite/conformance conformance"
   }
 }

@@ -28,8 +28,17 @@ It does not fail for tests outside the baseline (new upstream tests, unsupported
 features), nor for baseline tests that do not exist in another BullMQ version (renamed,
 removed, or not yet added upstream); both are listed in the report
 (`conformance/.work/summary.md`, also the CI job summary). Same-named tests inside a file
-count as one name that passes only if every occurrence passes, so the baseline holds
-**501 names for 510 passing tests**.
+count as one name that passes only if every occurrence passes.
+
+`ignored` in the same file lists tests whose outcome depends on timing rather than on the
+backend, each with a reason; they are never gated and survive a refresh. Currently one:
+`worker.test.ts` "should retry job after a delay time, keeping the current step" asserts
+`Date.now() - start > 200` after a 200 ms `moveToDelayed`; an in-process backend can
+finish in exactly 200 ms (reproduced in 4 of 24 local runs under load; it failed twice in
+the first CI run). Add entries only with such a reproduction, never to hide a bug.
+
+Baseline on 6.4.0: **500 gated names** + 1 ignored, covering the 510 passing tests.
+Three full runs in parallel (CPU contention) passed every gated test.
 
 CI runs the gate on Node 22 for the pinned development version, the oldest version of the
 peer range and the newest 6.x release; the weekly scheduled run re-resolves "newest".

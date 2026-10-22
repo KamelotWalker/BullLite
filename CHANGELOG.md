@@ -8,9 +8,10 @@
 - CI: tests run on the pinned, the oldest (6.3.9) and the newest 6.x BullMQ on Node 20/22/24,
   plus a weekly scheduled run that picks up new BullMQ releases (`pnpm bullmq:use`).
 - BullMQ's own test suite is now a CI gate: the tests recorded in `conformance/baseline.json`
-  (501 names, 510 tests on 6.4.0) must keep passing; new upstream tests and tests absent from
-  other BullMQ versions do not fail it. The harness runs the suite of the installed BullMQ
-  version. Refresh procedure: `docs/conformance.md`.
+  (500 names on 6.4.0, plus 1 timing-dependent upstream test listed as ignored with its reason)
+  must keep passing; new upstream tests and tests absent from other BullMQ versions do not fail
+  it. The harness runs the suite of the installed BullMQ version. Refresh procedure:
+  `docs/conformance.md`.
 - Fake timers guide (`docs/fake-timers.md`) and tests: delayed jobs, exponential backoff,
   stalled-job recovery and lock renewal on `vi.useFakeTimers()`; documented limitations
   (async clock APIs only, no `runAllTimers*` with an open Worker).

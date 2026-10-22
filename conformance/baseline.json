@@ -1,7 +1,12 @@
 {
   "bullmq": "6.4.0",
   "generated": "2026-10-22",
-  "count": 501,
+  "count": 500,
+  "ignored": {
+    "worker.test.ts": {
+      "workers > Retries and backoffs > when providing a way to execute step jobs > when moving job to delayed in one step > should retry job after a delay time, keeping the current step": "asserts `Date.now() - start > 200` for a 200 ms moveToDelayed; with an in-process backend the job can complete in exactly 200 ms (reproduced 4/24 runs under load, failed twice in CI run 39713118582)"
+    }
+  },
   "passing": {
     "bulk.test.ts": [
       "bulk jobs > should keep workers busy",
@@ -455,7 +460,6 @@
       "workers > Retries and backoffs > when backoff type is fixed > when jitter option is provided > when jitter is provided with lower value than 1 > updates job's delay property only applying jitter in a fixed percentage",
       "workers > Retries and backoffs > when jobs do not fail and get the maximum attempts limit > does not emit retries-exhausted event",
       "workers > Retries and backoffs > when providing a way to execute step jobs > should retry a job after a delay if a fixed backoff is given, keeping the current step",
-      "workers > Retries and backoffs > when providing a way to execute step jobs > when moving job to delayed in one step > should retry job after a delay time, keeping the current step",
       "workers > Retries and backoffs > when providing a way to execute step jobs > when moving job to delayed in one step > when passing maxStartedAttempts > should allow only retry a job once after it has reached the max attemptsStarted",
       "workers > Retries and backoffs > when providing a way to execute step jobs > when moving job to delayed in one step > when passing maxStartedAttempts > should fail job when consuming the max started attempts",
       "workers > Retries and backoffs > when providing a way to execute step jobs > when moving job to waiting in one step > should retry job right away, keeping the current step",

@@ -19,7 +19,9 @@
 // - baseline tests that do not exist in this BullMQ version (renamed, removed, not yet
 //   added) are reported; they fail the gate only when the version equals the baseline's;
 // - tests that are not in the baseline never fail the gate (new upstream tests, known
-//   unsupported features); newly passing ones are listed so the baseline can be refreshed.
+//   unsupported features); newly passing ones are listed so the baseline can be refreshed;
+// - tests listed under `ignored` in baseline.json (timing-dependent, with a reason) are
+//   never gated; the list survives --update-baseline.
 // Output: per-file table and gate report on stdout, .work/results.json, .work/summary.md.
 import { execFileSync, spawnSync } from 'node:child_process';
 import { cpSync, existsSync, readdirSync, readFileSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
@@ -186,21 +188,29 @@ const lines = [
   `| **Total** | **${totals.passed}** | **${totals.failed}** | **${totals.skipped}** |`,
 ];
 
+// `ignored` (kept across refreshes, edited by hand): { file: { test name: reason } } for tests
+// whose outcome is decided by timing rather than by the backend. They never fail the gate
+// and never enter `passing`.
+const previous = existsSync(baselineFile) ? JSON.parse(readFileSync(baselineFile, 'utf8')) : {};
+const ignored = previous.ignored ?? {};
+const isIgnored = (file, id) => Object.hasOwn(ignored[file] ?? {}, id);
+
 let gateFailed = false;
 if (updateBaseline) {
   const passing = {};
   for (const [file, r] of rows) {
-    const ids = [...r.tests].filter(([, s]) => s === 'passed').map(([id]) => id).sort();
+    const ids = [...r.tests].filter(([id, s]) => s === 'passed' && !isIgnored(file, id)).map(([id]) => id).sort();
     if (ids.length) passing[file] = ids;
   }
   const count = Object.values(passing).reduce((n, ids) => n + ids.length, 0);
   writeFileSync(
     baselineFile,
-    `${JSON.stringify({ bullmq: VERSION, generated: new Date().toISOString().slice(0, 10), count, passing }, null, 2)}\n`,
+    `${JSON.stringify({ bullmq: VERSION, generated: new Date().toISOString().slice(0, 10), count, ignored, passing }, null, 2)}\n`,
   );
   lines.push('', `Baseline rewritten: ${count} passing tests recorded for bullmq ${VERSION} (conformance/baseline.json).`);
 } else {
-  const baseline = JSON.parse(readFileSync(baselineFile, 'utf8'));
+  const baseline = previous;
+  if (!baseline.passing) throw new Error(`${baselineFile} is missing; create it with --update-baseline`);
   const sameVersion = baseline.bullmq === VERSION;
   const failing = []; // [file, id]
   const missing = [];
@@ -216,7 +226,7 @@ if (updateBaseline) {
       brokenFiles.push([file, r?.error ?? 'no results']);
       continue;
     }
-    for (const id of ids) {
+    for (const id of ids.filter((x) => !isIgnored(file, x))) {
       const s = r.tests.get(id);
       if (s === undefined) missing.push([file, id, 'test not in this BullMQ version']);
       else if (s === 'skipped') skippedNow.push([file, id]);
@@ -235,7 +245,9 @@ if (updateBaseline) {
   }
   const baselineIds = new Set(Object.entries(baseline.passing).flatMap(([f, ids]) => ids.map((id) => `${f}\u0000${id}`)));
   const improved = rows.flatMap(([f, r]) =>
-    [...r.tests].filter(([id, s]) => s === 'passed' && !baselineIds.has(`${f}\u0000${id}`)).map(([id]) => [f, id]),
+    [...r.tests]
+      .filter(([id, s]) => s === 'passed' && !baselineIds.has(`${f}\u0000${id}`) && !isIgnored(f, id))
+      .map(([id]) => [f, id]),
   );
   const missingFails = sameVersion && missing.length > 0;
   gateFailed = regressions.length > 0 || brokenFiles.length > 0 || missingFails;
@@ -253,6 +265,7 @@ if (updateBaseline) {
     `- Baseline tests absent from this version: ${missing.length}${missing.length ? (missingFails ? ' (fails the gate: same BullMQ version as the baseline)' : ' (allowed: different BullMQ version)') : ''}`,
     `- Baseline tests skipped by the suite: ${skippedNow.length}`,
     `- Passing tests not in the baseline: ${improved.length}${improved.length ? ' (refresh with `pnpm conformance --update-baseline`)' : ''}`,
+    `- Ignored (timing-dependent, see baseline.json): ${Object.values(ignored).reduce((n, o) => n + Object.keys(o).length, 0)}`,
   );
   const section = (title, items, fmt) => (items.length ? ['', `### ${title}`, '', ...list(items, fmt)] : []);
   lines.push(

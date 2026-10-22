@@ -12,18 +12,23 @@ jobs:
   publish:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
         with:
           node-version: 24
           registry-url: https://registry.npmjs.org
           cache: pnpm
+      # OIDC dist-tag support requires npm >=11.21.0.
+      - run: npm install --global npm@^11.21.0
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
       - run: pnpm typecheck
       - run: pnpm test
-      # After the first manual publish, configure this workflow as the trusted
-      # publisher for bullmq-memory-backend on npmjs.com. No NPM_TOKEN is used.
-      - run: npm publish --provenance --access public --tag alpha
+      # Trusted publisher: this repository + release.yml on npmjs.com; no NPM_TOKEN.
+      - run: npm publish --provenance --access public --tag latest
         working-directory: packages/memory
+      # Dist-tag permission is independent of publish permission in npm's settings.
+      - name: Update alpha dist-tag
+        continue-on-error: true
+        run: npm dist-tag add "bullmq-memory-backend@${GITHUB_REF_NAME#v}" alpha

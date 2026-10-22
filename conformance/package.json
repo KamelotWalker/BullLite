@@ -2,7 +2,7 @@
   "name": "@bulllite/conformance",
   "private": true,
   "type": "module",
-  "description": "Opt-in harness: runs BullMQ v6.4.0's own shared test suite against bullmq-memory-backend.",
+  "description": "Quality gate: runs BullMQ's own shared test suite (at the installed bullmq version's tag) against bullmq-memory-backend and compares it with baseline.json.",
   "scripts": {
     "conformance": "node run.mjs"
   },

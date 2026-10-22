@@ -1,12 +1,26 @@
-// Runs BullMQ v6.4.0's own shared test suite against bullmq-memory-backend.
+// Runs BullMQ's own shared test suite against bullmq-memory-backend and gates the
+// result against a committed baseline of passing tests (conformance/baseline.json).
 //
-//   BULLMQ_SRC=/path/to/bullmq-checkout-at-v6.4.0 node run.mjs [file filters...]
+//   node run.mjs [file filters...]                      # run + gate (exit 1 on regression)
+//   node run.mjs --update-baseline                     # run + rewrite baseline.json from this run
+//   BULLMQ_SRC=/path/to/bullmq-checkout node run.mjs   # use an existing checkout
 //
-// Without BULLMQ_SRC the tag is cloned into .work/bullmq-src (needs git and network).
-// The checkout is never modified: src/ and tests/ are copied into .work/bullmq and
-// the suite runs there with BullMQ's own Postgres-run pattern (vitest.postgres.setup.ts):
-// an inert test connection plus setDefaultBackendFactory(createMemoryBackend).
-// Output: per-file pass/fail/skip table on stdout, .work/results.json, .work/summary.md.
+// The BullMQ version is the one installed in packages/memory (see `pnpm bullmq:use`);
+// its git tag v<version> is cloned into .work/bullmq-src-<version> (needs git and network)
+// unless BULLMQ_SRC points at a checkout of that tag. The checkout is never modified:
+// src/ and tests/ are copied into .work/bullmq and the suite runs there with BullMQ's own
+// Postgres-run pattern (vitest.postgres.setup.ts): an inert test connection plus
+// setDefaultBackendFactory(createMemoryBackend).
+//
+// Gate (see docs/conformance.md):
+// - every baseline test that runs must pass; a failure is re-run once (whole file) and
+//   counts as a regression only if it fails again (timing-sensitive upstream tests);
+// - a test file that errors before running its tests is a regression;
+// - baseline tests that do not exist in this BullMQ version (renamed, removed, not yet
+//   added) are reported; they fail the gate only when the version equals the baseline's;
+// - tests that are not in the baseline never fail the gate (new upstream tests, known
+//   unsupported features); newly passing ones are listed so the baseline can be refreshed.
+// Output: per-file table and gate report on stdout, .work/results.json, .work/summary.md.
 import { execFileSync, spawnSync } from 'node:child_process';
 import { cpSync, existsSync, readdirSync, readFileSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
 import { createRequire } from 'node:module';
@@ -16,11 +30,20 @@ import { fileURLToPath } from 'node:url';
 const here = dirname(fileURLToPath(import.meta.url));
 const work = join(here, '.work');
 const target = join(work, 'bullmq');
-const TAG = 'v6.4.0';
+const baselineFile = join(here, 'baseline.json');
+
+const args = process.argv.slice(2);
+const updateBaseline = args.includes('--update-baseline');
+const filters = args.filter((a) => !a.startsWith('--'));
+if (updateBaseline && filters.length) throw new Error('--update-baseline needs a full run (no file filters)');
+
+const bullmqPkg = createRequire(resolve(here, '../packages/memory/package.json')).resolve('bullmq/package.json');
+const VERSION = JSON.parse(readFileSync(bullmqPkg, 'utf8')).version;
+const TAG = `v${VERSION}`;
 
 let source = process.env.BULLMQ_SRC;
 if (!source) {
-  source = join(work, 'bullmq-src');
+  source = join(work, `bullmq-src-${VERSION}`);
   if (!existsSync(source)) {
     mkdirSync(work, { recursive: true });
     execFileSync('git', ['clone', '--depth', '1', '--branch', TAG, 'https://github.com/taskforcesh/bullmq.git', source], {
@@ -28,19 +51,22 @@ if (!source) {
     });
   }
 }
-// package.json at the tag still says 6.3.19 (semantic-release bumps it after tagging), so check the tag.
+// package.json at a tag still has the previous version (semantic-release bumps it after
+// tagging), so check the tag itself.
 const tag = execFileSync('git', ['-C', source, 'describe', '--tags', '--exact-match'], { encoding: 'utf8' }).trim();
-if (tag !== TAG) throw new Error(`${source} is at ${tag}, expected ${TAG}`);
+if (tag !== TAG) throw new Error(`${source} is at ${tag}, expected ${TAG} (the installed bullmq)`);
 
 rmSync(target, { recursive: true, force: true });
 cpSync(join(source, 'src'), join(target, 'src'), { recursive: true });
 cpSync(join(source, 'tests'), join(target, 'tests'), { recursive: true });
-// src/scripts (Lua) and src/postgres/sql-scripts are build outputs (BullMQ's `pretest`
-// generators need ts-node etc.). The published bullmq@6.4.0 tarball ships the same
-// generated modules, so take them from there.
-const npmBullmq = join(dirname(createRequire(resolve(here, '../packages/memory/package.json')).resolve('bullmq/package.json')), 'dist/esm');
+// src/scripts (Lua) and, from 6.4.0, src/postgres/sql-scripts are build outputs (BullMQ's
+// `pretest` generators need ts-node etc.). The published tarball of the same version ships
+// the same generated modules, so take them from there.
+const npmBullmq = join(dirname(bullmqPkg), 'dist/esm');
 cpSync(join(npmBullmq, 'scripts'), join(target, 'src/scripts'), { recursive: true });
-cpSync(join(npmBullmq, 'postgres/sql-scripts.js'), join(target, 'src/postgres/sql-scripts.js'));
+if (existsSync(join(npmBullmq, 'postgres/sql-scripts.js'))) {
+  cpSync(join(npmBullmq, 'postgres/sql-scripts.js'), join(target, 'src/postgres/sql-scripts.js'));
+}
 
 // Files that cannot apply to a non-Redis IQueueBackend, with the reason (reported, not run).
 const EXCLUDED = [
@@ -62,7 +88,6 @@ for (const file of all) {
     excluded.push([file, 'does not exercise a backend (pure unit test)']);
   } else candidates.push(file);
 }
-const filters = process.argv.slice(2);
 const included = filters.length ? candidates.filter((f) => filters.some((x) => f.includes(x))) : candidates;
 
 const backendEntry = resolve(here, '../packages/memory/src/index.ts').replaceAll('\\', '/');
@@ -111,28 +136,45 @@ export default defineConfig({
 );
 
 const vitest = join(dirname(createRequire(join(here, 'package.json')).resolve('vitest/package.json')), 'vitest.mjs');
-const resultsFile = join(work, 'results.json');
-rmSync(resultsFile, { force: true });
-spawnSync(process.execPath, [vitest, 'run', '--config', 'vitest.bulllite.config.ts', '--reporter=json', `--outputFile=${resultsFile}`, '--reporter=dot'], {
-  cwd: target,
-  stdio: 'inherit',
-});
 
-const results = JSON.parse(readFileSync(resultsFile, 'utf8'));
-const rows = [];
-const totals = { passed: 0, failed: 0, skipped: 0 };
-for (const file of results.testResults) {
-  const name = file.name.replaceAll('\\', '/').split('/tests/').pop();
-  const c = { passed: 0, failed: 0, skipped: 0 };
-  for (const t of file.assertionResults) {
-    const k = t.status === 'passed' ? 'passed' : t.status === 'failed' ? 'failed' : 'skipped';
-    c[k]++;
-    totals[k]++;
+/** Runs vitest on `files` (test file names) and returns Map<file, {error, tests: Map<name, status>}>. */
+function runSuite(files, outFile) {
+  rmSync(outFile, { force: true });
+  spawnSync(
+    process.execPath,
+    [vitest, 'run', '--config', 'vitest.bulllite.config.ts', '--reporter=json', `--outputFile=${outFile}`, '--reporter=dot', ...files.map((f) => `tests/${f}`)],
+    { cwd: target, stdio: 'inherit' },
+  );
+  if (!existsSync(outFile)) throw new Error(`vitest wrote no results (${outFile})`);
+  const byFile = new Map();
+  for (const file of JSON.parse(readFileSync(outFile, 'utf8')).testResults) {
+    const name = file.name.replaceAll('\\', '/').split('/tests/').pop();
+    const tests = new Map();
+    for (const t of file.assertionResults) {
+      const id = [...t.ancestorTitles, t.title].join(' > ');
+      const status = t.status === 'passed' ? 'passed' : t.status === 'failed' ? 'failed' : 'skipped';
+      // Same-named tests: the name counts as passed only if every occurrence passed.
+      const prev = tests.get(id);
+      tests.set(id, prev === 'failed' || status === 'failed' ? 'failed' : prev === 'skipped' || status === 'skipped' ? 'skipped' : status);
+    }
+    // A file that fails before running tests (import/collection error) has no results.
+    const error = file.assertionResults.length === 0 && file.status === 'failed' ? file.message || 'suite error' : null;
+    byFile.set(name, { error, tests, counts: countStatuses(file.assertionResults) });
   }
-  if (file.assertionResults.length === 0 && file.status === 'failed') c.failed = NaN; // suite-level error
-  rows.push([name, c]);
+  return byFile;
 }
-rows.sort((a, b) => a[0].localeCompare(b[0]));
+
+function countStatuses(assertionResults) {
+  const c = { passed: 0, failed: 0, skipped: 0 };
+  for (const t of assertionResults) c[t.status === 'passed' ? 'passed' : t.status === 'failed' ? 'failed' : 'skipped']++;
+  return c;
+}
+
+const results = runSuite(included, join(work, 'results.json'));
+
+const rows = [...results].sort((a, b) => a[0].localeCompare(b[0]));
+const totals = { passed: 0, failed: 0, skipped: 0 };
+for (const [, r] of rows) for (const k of Object.keys(totals)) totals[k] += r.counts[k];
 const lines = [
   `# BullMQ ${TAG} shared suite on bullmq-memory-backend`,
   '',
@@ -140,14 +182,97 @@ const lines = [
   '',
   '| File | Passed | Failed | Skipped |',
   '|---|---:|---:|---:|',
-  ...rows.map(([n, c]) => `| ${n} | ${c.passed} | ${Number.isNaN(c.failed) ? 'suite error' : c.failed} | ${c.skipped} |`),
+  ...rows.map(([n, r]) => `| ${n} | ${r.counts.passed} | ${r.error ? 'suite error' : r.counts.failed} | ${r.counts.skipped} |`),
   `| **Total** | **${totals.passed}** | **${totals.failed}** | **${totals.skipped}** |`,
+];
+
+let gateFailed = false;
+if (updateBaseline) {
+  const passing = {};
+  for (const [file, r] of rows) {
+    const ids = [...r.tests].filter(([, s]) => s === 'passed').map(([id]) => id).sort();
+    if (ids.length) passing[file] = ids;
+  }
+  const count = Object.values(passing).reduce((n, ids) => n + ids.length, 0);
+  writeFileSync(
+    baselineFile,
+    `${JSON.stringify({ bullmq: VERSION, generated: new Date().toISOString().slice(0, 10), count, passing }, null, 2)}\n`,
+  );
+  lines.push('', `Baseline rewritten: ${count} passing tests recorded for bullmq ${VERSION} (conformance/baseline.json).`);
+} else {
+  const baseline = JSON.parse(readFileSync(baselineFile, 'utf8'));
+  const sameVersion = baseline.bullmq === VERSION;
+  const failing = []; // [file, id]
+  const missing = [];
+  const skippedNow = [];
+  const brokenFiles = [];
+  for (const [file, ids] of Object.entries(baseline.passing)) {
+    if (!included.includes(file)) {
+      if (!filters.length) missing.push(...ids.map((id) => [file, id, 'file not in this BullMQ version']));
+      continue;
+    }
+    const r = results.get(file);
+    if (!r || r.error) {
+      brokenFiles.push([file, r?.error ?? 'no results']);
+      continue;
+    }
+    for (const id of ids) {
+      const s = r.tests.get(id);
+      if (s === undefined) missing.push([file, id, 'test not in this BullMQ version']);
+      else if (s === 'skipped') skippedNow.push([file, id]);
+      else if (s === 'failed') failing.push([file, id]);
+    }
+  }
+  // Re-run the files of failing baseline tests once; only a second failure is a regression.
+  let regressions = failing;
+  let flaky = [];
+  if (failing.length) {
+    const retryFiles = [...new Set(failing.map(([f]) => f))];
+    console.log(`\nRe-running ${retryFiles.length} file(s) with ${failing.length} failing baseline test(s): ${retryFiles.join(', ')}`);
+    const retry = runSuite(retryFiles, join(work, 'results-retry.json'));
+    regressions = failing.filter(([f, id]) => retry.get(f)?.tests.get(id) !== 'passed');
+    flaky = failing.filter(([f, id]) => retry.get(f)?.tests.get(id) === 'passed');
+  }
+  const baselineIds = new Set(Object.entries(baseline.passing).flatMap(([f, ids]) => ids.map((id) => `${f}\u0000${id}`)));
+  const improved = rows.flatMap(([f, r]) =>
+    [...r.tests].filter(([id, s]) => s === 'passed' && !baselineIds.has(`${f}\u0000${id}`)).map(([id]) => [f, id]),
+  );
+  const missingFails = sameVersion && missing.length > 0;
+  gateFailed = regressions.length > 0 || brokenFiles.length > 0 || missingFails;
+
+  const list = (items, fmt) => items.map((x) => `- ${fmt(x)}`);
+  lines.push(
+    '',
+    `## Gate: ${gateFailed ? 'FAILED' : 'passed'}`,
+    '',
+    `Baseline: ${baseline.count} passing tests recorded on bullmq ${baseline.bullmq} (${baseline.generated}); this run: bullmq ${VERSION}.`,
+    '',
+    `- Regressions (baseline test failed twice): **${regressions.length}**`,
+    `- Broken files (suite error): **${brokenFiles.length}**`,
+    `- Flaky (failed, passed on re-run): ${flaky.length}`,
+    `- Baseline tests absent from this version: ${missing.length}${missing.length ? (missingFails ? ' (fails the gate: same BullMQ version as the baseline)' : ' (allowed: different BullMQ version)') : ''}`,
+    `- Baseline tests skipped by the suite: ${skippedNow.length}`,
+    `- Passing tests not in the baseline: ${improved.length}${improved.length ? ' (refresh with `pnpm conformance --update-baseline`)' : ''}`,
+  );
+  const section = (title, items, fmt) => (items.length ? ['', `### ${title}`, '', ...list(items, fmt)] : []);
+  lines.push(
+    ...section('Regressions', regressions, ([f, id]) => `${f} — ${id}`),
+    ...section('Broken files', brokenFiles, ([f, e]) => `${f} — ${String(e).split('\n')[0]}`),
+    ...section('Flaky', flaky, ([f, id]) => `${f} — ${id}`),
+    ...section('Absent from this version', missing, ([f, id, why]) => `${f} — ${id} (${why})`),
+    ...section('Skipped by the suite', skippedNow, ([f, id]) => `${f} — ${id}`),
+    ...section('Passing, not in the baseline', improved, ([f, id]) => `${f} — ${id}`),
+  );
+}
+
+lines.push(
   '',
   '## Not run',
   '',
   '| File | Reason |',
   '|---|---|',
   ...excluded.map(([f, r]) => `| ${f} | ${r} |`),
-];
+);
 writeFileSync(join(work, 'summary.md'), `${lines.join('\n')}\n`);
 console.log(`\n${lines.join('\n')}`);
+if (gateFailed) process.exit(1);

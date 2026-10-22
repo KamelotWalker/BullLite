@@ -1,16 +1,61 @@
 # BullMQ's own test suite on `bullmq-memory-backend`
 
 `pnpm conformance` (script: `conformance/run.mjs`) copies `src/` and `tests/` of a
-`taskforcesh/bullmq` checkout at tag `v6.4.0` (cloned, or `BULLMQ_SRC=<path>`) into
-`conformance/.work/` without modifying them, takes the generated Lua/SQL script
-modules from the published `bullmq@6.4.0` tarball, and runs the shared test files
-with BullMQ's own non-Redis pattern (`vitest.postgres.setup.ts`): an inert test
-connection plus `setDefaultBackendFactory(createMemoryBackend)` with one retained
-namespace per test-file process.
+`taskforcesh/bullmq` checkout at the git tag of the **installed** `bullmq` version
+(`v<version>`, cloned into `conformance/.work/bullmq-src-<version>`, or
+`BULLMQ_SRC=<path>`) into `conformance/.work/` without modifying them, takes the
+generated Lua/SQL script modules from the published tarball of the same version, and
+runs the shared test files with BullMQ's own non-Redis pattern
+(`vitest.postgres.setup.ts`): an inert test connection plus
+`setDefaultBackendFactory(createMemoryBackend)` with one retained namespace per
+test-file process. Switch the version with `pnpm bullmq:use oldest|latest|6.x.y`.
 
-## Latest local run (Node 24.22, Windows 11, 2026-10-21)
+## The gate
 
-**510 passed, 272 failed, 3 skipped** (785 tests in 23 files, ~75 s). Re-run after the review fixes (redis-parity tests): unchanged.
+[`conformance/baseline.json`](../conformance/baseline.json) lists, per test file, the
+names of the tests that passed when it was generated (BullMQ version and date are in the
+file). `pnpm conformance` fails (exit code 1) when:
+
+- a baseline test runs and fails, and fails again when its file is re-run once
+  (timing-sensitive upstream tests get one retry; a test that passes on the re-run is
+  reported as flaky);
+- a test file that has baseline tests errors before running them (import/collection error);
+- the installed BullMQ version **equals** the baseline's version and a baseline test did
+  not run at all (guards against tests disappearing silently, e.g. a harness exclusion
+  that matches too much).
+
+It does not fail for tests outside the baseline (new upstream tests, unsupported
+features), nor for baseline tests that do not exist in another BullMQ version (renamed,
+removed, or not yet added upstream); both are listed in the report
+(`conformance/.work/summary.md`, also the CI job summary). Same-named tests inside a file
+count as one name that passes only if every occurrence passes, so the baseline holds
+**501 names for 510 passing tests**.
+
+CI runs the gate on Node 22 for the pinned development version, the oldest version of the
+peer range and the newest 6.x release; the weekly scheduled run re-resolves "newest".
+
+### Refreshing the baseline
+
+When a change makes more tests pass, or after moving the pinned `bullmq` devDependency to
+a new release:
+
+```bash
+pnpm install                            # the pinned version (or: pnpm bullmq:use x.y.z)
+pnpm conformance --update-baseline      # full run only; rewrites conformance/baseline.json
+git diff conformance/baseline.json      # removals are regressions: explain them or fix them
+```
+
+Generate the baseline from the pinned version so that the strict "same version" rule
+applies to everyday CI runs. A test that genuinely cannot pass any more (an upstream test
+rewritten to need Redis, say) is removed by the refresh; say why in the commit message.
+
+Verified 2026-10-22: with `promote()` broken on purpose (`job.test.ts` + `delay.test.ts`
+run), the gate reported 5 regressions and exited 1; on the unmodified backend it passes on
+6.4.0 (510 passed) and on 6.3.9 (504 passed; 6 baseline tests do not exist in 6.3.9's suite).
+
+## Latest local run on 6.4.0 (Node 24.22, Windows 11, 2026-10-22)
+
+**510 passed, 272 failed, 3 skipped** (785 tests in 23 files, ~75 s); unchanged since 2026-10-21.
 
 Failure breakdown (classified from the failure messages):
 

@@ -2,7 +2,16 @@
 
 English, source-verified against `bullmq@6.4.0` (git tag `v6.4.0`, commit `253bc4b1acd9c6030c01817b38ae65e067666ed4`, https://github.com/taskforcesh/bullmq/tree/v6.4.0).
 
-§0 is the **current** status of `bullmq-memory-backend` (v0.1.0-alpha). §1–§8 are the Phase 0 contract inventory; their "Prio" columns are the original plan and are kept for reference.
+§0 is the **current** status of `bullmq-memory-backend` (v0.1.0-alpha.1). §1–§8 are the Phase 0 contract inventory; their "Prio" columns are the original plan and are kept for reference.
+
+**Supported BullMQ versions: `^6.3.9`** (peer dependency since 0.1.0-alpha.1; 0.1.0-alpha.0 required exactly 6.4.0). How the lower bound was established (2026-10-22, from the published npm tarballs):
+
+| BullMQ | Result |
+|---|---|
+| 6.0.0, 6.1.0, 6.2.0, 6.3.0 – 6.3.8 | Not supported: no `withBackend()` (`dist/esm/utils/with-backend.js` absent). In 6.3.8 `BackendFactory` / `QueueBaseOptions` are also not generic over the connection options: `tsc --noEmit` of this package against 6.3.8 reports 55 errors (e.g. `TS2315: Type 'QueueBaseOptions' is not generic`). |
+| 6.3.9 – 6.4.0 (12 releases) | `dist/esm/interfaces/queue-backend.d.ts` and `dist/esm/utils/create-backend.d.ts` are byte-identical across all 12. For each release: typecheck clean, full behaviour suite and README examples green. BullMQ's shared suite passes the conformance gate on 6.3.9 (504 passed) and 6.4.0 (510 passed). |
+
+CI keeps checking both ends of the range: the oldest version (6.3.9) and the newest 6.x release, re-resolved by a weekly scheduled run. §1–§8 below are verified against 6.4.0 only; line numbers may differ in other releases.
 
 Conventions: `qb:N` = `src/interfaces/queue-backend.ts:N`; `rel:N` = `src/interfaces/relay-backend.ts:N`; all other paths are relative to `src/` of the tag. `pg:N` = `src/postgres/postgres-queue-backend.ts:N`. Caller line numbers come from a scripted scan of `src/classes/*.ts` and `src/utils/*.ts` (excluding the Redis/Postgres backends themselves); a member showing no caller is exposed publicly by a high-level class only through a path I did not trace (marked "—").
 
@@ -10,7 +19,7 @@ Honesty rule (PROJECT.md): a member that is not implemented MUST throw a clear `
 
 ---
 
-## 0. `bullmq-memory-backend` v0.1.0-alpha — per-member status
+## 0. `bullmq-memory-backend` v0.1.0-alpha.1 — per-member status
 
 **Supported** = real behaviour, exercised through the real BullMQ classes by `packages/memory/test` and/or BullMQ's own shared suite (`docs/conformance.md`). **Experimental** = implemented, but with a documented semantic gap. **Unsupported** = rejects with `UnsupportedError` (`.method` names the member); `forQueue` throws synchronously. Totals: **63 Supported, 4 Experimental, 23 Unsupported = 90**.
 

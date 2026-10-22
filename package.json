@@ -8,6 +8,7 @@
     "typecheck": "pnpm --filter bullmq-memory-backend typecheck",
     "test": "pnpm --filter bullmq-memory-backend test && pnpm --filter @bulllite/examples test",
     "test:readme": "pnpm --filter bullmq-memory-backend build && pnpm --filter @bulllite/examples test",
-    "conformance": "pnpm --filter @bulllite/conformance conformance"
+    "conformance": "pnpm --filter @bulllite/conformance conformance",
+    "bullmq:use": "node scripts/use-bullmq.mjs"
   }
 }

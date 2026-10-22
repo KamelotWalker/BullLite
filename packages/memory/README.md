@@ -1,7 +1,7 @@
 # bullmq-memory-backend
 
-Experimental alpha (`0.1.0-alpha.0`) in-memory backend for BullMQ v6 `IQueueBackend`
-(`bullmq@6.4.0`): run real `Queue`, `Worker` and `QueueEvents` in tests and local
+Experimental alpha (`0.1.0-alpha.1`) in-memory backend for BullMQ v6 `IQueueBackend`
+(`bullmq@^6.3.9`): run real `Queue`, `Worker` and `QueueEvents` in tests and local
 development without Redis.
 
 **Unofficial community project; not affiliated with BullMQ or Taskforce.sh.**
@@ -13,7 +13,7 @@ No persistence, single process, no production guarantees.
 npm install -D bullmq bullmq-memory-backend
 ```
 
-The peer dependency is pinned to `bullmq@6.4.0`, the only tested BullMQ version.
+Supported: `bullmq@^6.3.9` (CI tests 6.3.9 and the newest 6.x release, weekly).
 Node.js 20, 22 and 24 are tested. Both ESM and CommonJS are shipped.
 
 ## Quick start
@@ -35,5 +35,5 @@ await queue.close();
 ```
 
 Or keep your code unchanged and call `setDefaultBackendFactory(createMemoryBackend)`
-in your test setup. Support matrix, store lifetime (`retain`, `resetMemoryStore`)
-and limitations: https://github.com/KamelotWalker/BullLite#readme
+in your test setup. Support matrix, store lifetime (`retain`, `resetMemoryStore`),
+fake timers and limitations: https://github.com/KamelotWalker/BullLite#readme

@@ -8,7 +8,7 @@ classes; only the datastore underneath is swapped for a fast, deterministic,
 in-process one. Built for test suites and local development.
 
 > [!WARNING]
-> **Experimental alpha (v0.1.0-alpha.0).** No production guarantees. Not a Redis
+> **Experimental alpha (v0.1.0-alpha.1).** No production guarantees. Not a Redis
 > replacement, not durable, not multi-process.
 >
 > **Unofficial community project; not affiliated with BullMQ or Taskforce.sh.**
@@ -19,8 +19,10 @@ in-process one. Built for test suites and local development.
 npm install -D bullmq bullmq-memory-backend
 ```
 
-The peer dependency is pinned to `bullmq@6.4.0`, the only tested BullMQ version.
-ESM and CommonJS are both shipped; Node.js 20, 22 and 24 are tested.
+Supported BullMQ versions: **`bullmq@^6.3.9`** (6.3.9 is the first release with
+`withBackend()` and the generic `BackendFactory` this package implements). CI tests the
+oldest and the newest 6.x release of that range, plus a weekly run that picks up new
+BullMQ releases. ESM and CommonJS are both shipped; Node.js 20, 22 and 24 are tested.
 
 ## Quick start
 
@@ -135,12 +137,23 @@ Per-`IQueueBackend`-member status: [docs/compatibility.md](docs/compatibility.md
 
 ### Conformance against BullMQ's own test suite
 
-`pnpm conformance` runs BullMQ v6.4.0's shared test files (unmodified) against
-this backend, the same way BullMQ runs them against its Postgres backend. Latest
-local run: **510 passed, 272 failed, 3 skipped** (785 tests, 23 files). 256 failures
+`pnpm conformance` runs BullMQ's shared test files (unmodified, at the git tag of the
+installed `bullmq` version) against this backend, the same way BullMQ runs them against
+its Postgres backend, and acts as a CI gate: every test recorded as passing in
+[`conformance/baseline.json`](conformance/baseline.json) must keep passing. Latest local
+run on 6.4.0: **510 passed, 272 failed, 3 skipped** (785 tests, 23 files). 256 failures
 are unsupported features above (flows, schedulers, deduplication, rate limiting,
 metrics) and 16 are tests that talk to Redis directly; none is attributed to a
-Supported feature. Details and the per-file table: [docs/conformance.md](docs/conformance.md).
+Supported feature. Details, gate rules and how to refresh the baseline:
+[docs/conformance.md](docs/conformance.md).
+
+## Fake timers
+
+Delayed jobs, retry backoff and stalled-job checks run on your fake clock
+(`vi.useFakeTimers()`), while backend replies do not depend on it. Advance with the
+async APIs (`vi.advanceTimersByTimeAsync`), wait for worker/queue events, and do not
+call `runAllTimers*` while a `Worker` is open. Guide, examples and limitations:
+[docs/fake-timers.md](docs/fake-timers.md).
 
 ## Limitations (by design)
 
@@ -150,9 +163,9 @@ Supported feature. Details and the per-file table: [docs/conformance.md](docs/co
 - Not for production traffic: no memory limits beyond BullMQ's retention options;
   completed/failed jobs are kept until removed, like on Redis.
 - Every backend reply is delivered on a later macrotask (like a network reply),
-  using a `MessageChannel` so that fake timers (`vi.useFakeTimers()`, Jest, sinon)
-  do not stall `queue.add()`. BullMQ's own timers (delays, backoff, stalled checks)
-  still follow your fake clock.
+  using a `MessageChannel` so that fake timers do not stall `queue.add()`. BullMQ's
+  own timers (delays, backoff, stalled checks) still follow your fake clock; see
+  [docs/fake-timers.md](docs/fake-timers.md).
 
 ## How does this compare to PGlite + BullMQ's Postgres backend?
 
@@ -172,8 +185,10 @@ first `add` to 20th `completed` in 1.6–7.8 ms (15 rounds), and `add` → `Queu
 
 ## Version policy
 
-- `bullmq` peer dependency: **exactly `6.4.0`**, the only version tested. The range
-  widens only after the suite and the conformance run pass on another release.
+- `bullmq` peer dependency: **`^6.3.9`**. CI runs the full suite and the conformance
+  gate on 6.3.9, on the newest 6.x release (re-resolved weekly) and on the pinned
+  development version. A BullMQ release that breaks the gate is excluded or fixed in a
+  patch release; BullMQ 7 needs a new major range.
 - Node.js: 20, 22, 24 (CI matrix).
 - `0.x`: only the support matrix above is promised; behaviour may change between
   minor versions and is noted in [CHANGELOG.md](CHANGELOG.md).
@@ -184,7 +199,8 @@ first `add` to 20th `completed` in 1.6–7.8 ms (15 rounds), and `add` → `Queu
 corepack pnpm install
 pnpm typecheck
 pnpm test            # build + behaviour suite + README examples (compiled and executed)
-pnpm conformance     # BullMQ's own suite (clones taskforcesh/bullmq@v6.4.0, or set BULLMQ_SRC)
+pnpm conformance     # BullMQ's own suite as a gate against conformance/baseline.json
+pnpm bullmq:use oldest   # or: latest | 6.x.y — reinstall the workspace with another bullmq
 ```
 
 Design document (Turkish): [PROJECT.md](PROJECT.md).

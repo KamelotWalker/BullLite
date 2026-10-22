@@ -1,6 +1,6 @@
 {
   "name": "bullmq-memory-backend",
-  "version": "0.1.0-alpha.0",
+  "version": "0.1.0-alpha.1",
   "description": "Unofficial in-memory, Redis-free backend for BullMQ v6 IQueueBackend, for testing and local development.",
   "license": "MIT",
   "author": "KamelotWalker",

@@ -1,6 +1,21 @@
 # Changelog
 
-## bullmq-memory-backend 0.1.0-alpha.0 (unreleased)
+## bullmq-memory-backend 0.1.0-alpha.1 (unreleased)
+
+- **Peer dependency widened from exactly `bullmq@6.4.0` to `^6.3.9`.** 6.3.9 is the first
+  release with `withBackend()` and the generic `BackendFactory`; every release from 6.3.9 to
+  6.4.0 typechecks and passes the behaviour suite. Evidence: `docs/compatibility.md`.
+- CI: tests run on the pinned, the oldest (6.3.9) and the newest 6.x BullMQ on Node 20/22/24,
+  plus a weekly scheduled run that picks up new BullMQ releases (`pnpm bullmq:use`).
+- BullMQ's own test suite is now a CI gate: the tests recorded in `conformance/baseline.json`
+  (501 names, 510 tests on 6.4.0) must keep passing; new upstream tests and tests absent from
+  other BullMQ versions do not fail it. The harness runs the suite of the installed BullMQ
+  version. Refresh procedure: `docs/conformance.md`.
+- Fake timers guide (`docs/fake-timers.md`) and tests: delayed jobs, exponential backoff,
+  stalled-job recovery and lock renewal on `vi.useFakeTimers()`; documented limitations
+  (async clock APIs only, no `runAllTimers*` with an open Worker).
+
+## bullmq-memory-backend 0.1.0-alpha.0
 
 First experimental release. Tested with `bullmq@6.4.0` on Node.js 20, 22, 24.
 

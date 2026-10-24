@@ -14,3 +14,4 @@ for (const project of ['tsconfig.build.json', 'tsconfig.build.cjs.json']) {
 writeFileSync(new URL('../dist/cjs/package.json', import.meta.url), '{ "type": "commonjs" }\n');
 copyFileSync(new URL('../../../LICENSE', import.meta.url), new URL('../LICENSE', import.meta.url));
 copyFileSync(new URL('../../../CHANGELOG.md', import.meta.url), new URL('../CHANGELOG.md', import.meta.url));
+copyFileSync(new URL('../../../README.md', import.meta.url), new URL('../README.md', import.meta.url));

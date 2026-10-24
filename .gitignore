@@ -2,6 +2,7 @@ node_modules
 dist
 packages/memory/LICENSE
 packages/memory/CHANGELOG.md
+packages/memory/README.md
 packages/memory/*.tgz
 examples/.generated
 conformance/.work

@@ -1,6 +1,18 @@
 # Changelog
 
-## bullmq-memory-backend 0.1.0-alpha.1 (unreleased)
+## bullmq-memory-backend 0.1.0-alpha.2
+
+Documentation and package metadata only; no runtime change.
+
+- The npm package README is now the full repository README (copied at build time), with
+  Vitest and Jest setup recipes (tested on Vitest 5.0.5 and Jest 30.5.2), when-to-use
+  guidance, a comparison with other ways to test BullMQ without Redis, an FAQ and an API
+  table. Links point to GitHub so they work on npmjs.com.
+- `llms.txt` at the repository root for AI assistants and crawlers.
+- Package description and keywords describe the use case ("run BullMQ without Redis",
+  Vitest, Jest).
+
+## bullmq-memory-backend 0.1.0-alpha.1
 
 - **Peer dependency widened from exactly `bullmq@6.4.0` to `^6.3.9`.** 6.3.9 is the first
   release with `withBackend()` and the generic `BackendFactory`; every release from 6.3.9 to
